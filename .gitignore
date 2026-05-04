@@ -1,0 +1,29 @@
+# Rust build artifacts
+/target/
+/Cargo.lock
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# OS
+Thumbs.db
+
+/.omnix/
+/.omnix-*/
+
+# Test artifacts
+*.profraw
+*.profdata
+
+# Backup files
+*.bak
+*.orig
+
+# Environment
+.env
+.env.local
