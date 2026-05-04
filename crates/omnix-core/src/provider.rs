@@ -1,0 +1,360 @@
+use std::pin::Pin;
+
+use anyhow::{Context, Result};
+use futures::{Stream, StreamExt};
+use omnix_protocol::{
+    ChatMessage, ContentBlock, Role, StopReason, TokenUsage, ToolChoice, ToolDefinition,
+};
+use reqwest::Client;
+use serde::Deserialize;
+
+pub struct LlamaCppProvider {
+    client: Client,
+    base_url: String,
+    model: String,
+}
+
+pub struct ChatRequest {
+    pub model: String,
+    pub system_prompt: String,
+    pub messages: Vec<ChatMessage>,
+    pub tools: Vec<ToolDefinition>,
+    pub tool_choice: ToolChoice,
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+}
+
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    MessageStart {
+        model: String,
+        usage: TokenUsage,
+    },
+    ContentBlockDelta {
+        index: usize,
+        delta: ContentBlockDelta,
+    },
+    MessageDelta {
+        stop_reason: Option<StopReason>,
+        usage: Option<TokenUsage>,
+    },
+    MessageStop,
+    Error {
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum ContentBlockDelta {
+    TextDelta { text: String },
+    InputJsonDelta { partial_json: String },
+}
+
+impl LlamaCppProvider {
+    pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            client: Client::new(),
+            base_url: base_url.into(),
+            model: model.into(),
+        }
+    }
+
+    /// Send a chat request and stream the response as `StreamEvent`s.
+    pub async fn stream_chat(
+        &self,
+        request: ChatRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = StreamEvent> + Send>>> {
+        let url = format!("{}/v1/chat/completions", self.base_url);
+        let body = self.build_request_body(request)?;
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("Failed to connect to llama.cpp server at {}", url))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("llama.cpp returned {}: {}", status, text);
+        }
+
+        let model = self.model.clone();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+        tokio::spawn(async move {
+            let _ = tx.send(StreamEvent::MessageStart {
+                model: model.clone(),
+                usage: TokenUsage::zero(),
+            });
+
+            let mut stream = response.bytes_stream();
+            let mut buffer = String::new();
+
+            while let Some(chunk) = stream.next().await {
+                match chunk {
+                    Ok(bytes) => {
+                        buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+                        // Process complete lines from buffer
+                        while let Some(pos) = buffer.find('\n') {
+                            let line = buffer.drain(..=pos).collect::<String>();
+                            let line = line.trim();
+
+                            if line.is_empty() || line.starts_with(":") {
+                                continue;
+                            }
+
+                            if line == "data: [DONE]" {
+                                let _ = tx.send(StreamEvent::MessageStop);
+                                return;
+                            }
+
+                            if let Some(json_str) = line.strip_prefix("data: ") {
+                                match serde_json::from_str::<StreamChunk>(json_str) {
+                                    Ok(chunk) => {
+                                        if let Some(choice) = chunk.choices.first() {
+                                            if let Some(delta) = &choice.delta {
+                                                // Text delta
+                                                if let Some(text) = &delta.content {
+                                                    let _ =
+                                                        tx.send(StreamEvent::ContentBlockDelta {
+                                                            index: 0,
+                                                            delta: ContentBlockDelta::TextDelta {
+                                                                text: text.clone(),
+                                                            },
+                                                        });
+                                                }
+
+                                                for tc in &delta.tool_calls {
+                                                    if let Some(args) = &tc.function.arguments {
+                                                        let _ = tx.send(
+                                                            StreamEvent::ContentBlockDelta {
+                                                                index: tc.index as usize,
+                                                                delta: ContentBlockDelta::InputJsonDelta {
+                                                                    partial_json: args.clone(),
+                                                                },
+                                                            },
+                                                        );
+                                                    }
+                                                }
+                                            }
+
+                                            // Finish reason
+                                            if let Some(reason) = &choice.finish_reason {
+                                                let stop_reason = match reason.as_str() {
+                                                    "stop" => Some(StopReason::EndTurn),
+                                                    "tool_calls" => Some(StopReason::ToolUse),
+                                                    "length" => Some(StopReason::MaxTokens),
+                                                    _ => None,
+                                                };
+                                                let _ = tx.send(StreamEvent::MessageDelta {
+                                                    stop_reason,
+                                                    usage: None,
+                                                });
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.send(StreamEvent::Error {
+                                            message: format!("JSON parse error: {}", e),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(StreamEvent::Error {
+                            message: format!("Stream error: {}", e),
+                        });
+                    }
+                }
+            }
+
+            let _ = tx.send(StreamEvent::MessageStop);
+        });
+
+        Ok(Box::pin(
+            tokio_stream::wrappers::UnboundedReceiverStream::new(rx),
+        ))
+    }
+
+    pub async fn health_check(&self) -> Result<()> {
+        let url = format!("{}/v1/chat/completions", self.base_url);
+        let body = serde_json::json!({
+            "model": self.model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 1
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("Cannot connect to llama.cpp server at {}", self.base_url))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("llama.cpp returned {}: {}", status, text);
+        }
+
+        Ok(())
+    }
+
+    // Internal: build the JSON request body
+    fn build_request_body(&self, request: ChatRequest) -> Result<serde_json::Value> {
+        let mut messages = Vec::new();
+
+        messages.push(serde_json::json!({
+            "role": "system",
+            "content": request.system_prompt
+        }));
+
+        for msg in request.messages {
+            match msg.role {
+                Role::User => {
+                    let text: String = msg
+                        .content
+                        .into_iter()
+                        .filter_map(|b| match b {
+                            ContentBlock::Text { text } => Some(text),
+                            _ => None,
+                        })
+                        .collect();
+                    messages.push(serde_json::json!({"role": "user", "content": text}));
+                }
+                Role::Assistant => {
+                    let mut content = String::new();
+                    let mut tool_calls = Vec::new();
+
+                    for block in msg.content {
+                        match block {
+                            ContentBlock::Text { text } => content.push_str(&text),
+                            ContentBlock::ToolUse { id, name, input } => {
+                                tool_calls.push(serde_json::json!({
+                                    "id": id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": name,
+                                        "arguments": input.to_string()
+                                    }
+                                }));
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    let mut assistant_msg = serde_json::json!({
+                        "role": "assistant",
+                        "content": content
+                    });
+                    if !tool_calls.is_empty() {
+                        assistant_msg["tool_calls"] = serde_json::Value::Array(tool_calls);
+                    }
+                    messages.push(assistant_msg);
+                }
+                Role::Tool => {
+                    for block in msg.content {
+                        if let ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            ..
+                        } = block
+                        {
+                            messages.push(serde_json::json!({
+                                "role": "tool",
+                                "tool_call_id": tool_use_id,
+                                "content": content
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "messages": messages,
+            "stream": true
+        });
+
+        if !request.tools.is_empty() {
+            let tools: Vec<serde_json::Value> = request
+                .tools
+                .into_iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": t.input_schema
+                        }
+                    })
+                })
+                .collect();
+            body["tools"] = serde_json::Value::Array(tools);
+        }
+
+        match request.tool_choice {
+            ToolChoice::Auto => {}
+            ToolChoice::Any => {
+                body["tool_choice"] = "required".into();
+            }
+            ToolChoice::Named(name) => {
+                body["tool_choice"] = serde_json::json!({
+                    "type": "function",
+                    "function": { "name": name }
+                });
+            }
+        }
+
+        if let Some(max) = request.max_tokens {
+            body["max_tokens"] = max.into();
+        }
+        if let Some(temp) = request.temperature {
+            body["temperature"] = temp.into();
+        }
+
+        Ok(body)
+    }
+}
+
+// Lightweight structs for parsing the OpenAI-compatible SSE stream
+#[derive(Debug, Deserialize)]
+struct StreamChunk {
+    choices: Vec<StreamChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamChoice {
+    delta: Option<StreamDelta>,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamDelta {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<StreamToolCallDelta>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamToolCallDelta {
+    index: i32,
+    function: StreamFunctionDelta,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamFunctionDelta {
+    #[serde(default)]
+    arguments: Option<String>,
+}
