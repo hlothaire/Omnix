@@ -1,6 +1,8 @@
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result};
+use futures::future::BoxFuture;
 use futures::{Stream, StreamExt};
 use omnix_protocol::{
     ChatMessage, ContentBlock, Role, StopReason, TokenUsage, ToolChoice, ToolDefinition,
@@ -8,10 +10,13 @@ use omnix_protocol::{
 use reqwest::Client;
 use serde::Deserialize;
 
-pub struct LlamaCppProvider {
-    client: Client,
-    base_url: String,
-    model: String,
+pub trait Provider: Send + Sync {
+    fn stream_chat(
+        &self,
+        request: ChatRequest,
+    ) -> BoxFuture<'_, Result<Pin<Box<dyn Stream<Item = StreamEvent> + Send>>>>;
+
+    fn health_check(&self) -> BoxFuture<'_, Result<()>>;
 }
 
 pub struct ChatRequest {
@@ -55,6 +60,12 @@ pub enum ContentBlockDelta {
     InputJsonDelta { partial_json: String },
 }
 
+pub struct LlamaCppProvider {
+    client: Client,
+    base_url: String,
+    model: String,
+}
+
 impl LlamaCppProvider {
     pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
@@ -63,171 +74,180 @@ impl LlamaCppProvider {
             model: model.into(),
         }
     }
+}
 
-    /// Send a chat request and stream the response as `StreamEvent`s.
-    pub async fn stream_chat(
+impl Provider for LlamaCppProvider {
+    fn stream_chat(
         &self,
         request: ChatRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = StreamEvent> + Send>>> {
+    ) -> BoxFuture<'_, Result<Pin<Box<dyn Stream<Item = StreamEvent> + Send>>>> {
         let url = format!("{}/v1/chat/completions", self.base_url);
-        let body = self.build_request_body(request)?;
-
-        let response = self
-            .client
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("Failed to connect to llama.cpp server at {}", url))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            anyhow::bail!("llama.cpp returned {}: {}", status, text);
-        }
-
+        let body = self.build_request_body(request);
+        let client = self.client.clone();
         let model = self.model.clone();
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
-        tokio::spawn(async move {
-            let _ = tx.send(StreamEvent::MessageStart {
-                model: model.clone(),
-                usage: TokenUsage::zero(),
-            });
+        Box::pin(async move {
+            let body = body?;
 
-            let mut stream = response.bytes_stream();
-            let mut buffer = String::new();
+            let response = client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .with_context(|| format!("Failed to connect to llama.cpp server at {}", url))?;
 
-            while let Some(chunk) = stream.next().await {
-                match chunk {
-                    Ok(bytes) => {
-                        buffer.push_str(&String::from_utf8_lossy(&bytes));
+            if !response.status().is_success() {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                anyhow::bail!("llama.cpp returned {}: {}", status, text);
+            }
 
-                        // Process complete lines from buffer
-                        while let Some(pos) = buffer.find('\n') {
-                            let line = buffer.drain(..=pos).collect::<String>();
-                            let line = line.trim();
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
-                            if line.is_empty() || line.starts_with(":") {
-                                continue;
-                            }
+            tokio::spawn(async move {
+                let _ = tx.send(StreamEvent::MessageStart {
+                    model: model.clone(),
+                    usage: TokenUsage::zero(),
+                });
 
-                            if line == "data: [DONE]" {
-                                let _ = tx.send(StreamEvent::MessageStop);
-                                return;
-                            }
+                let mut stream = response.bytes_stream();
+                let mut buffer = String::new();
 
-                            if let Some(json_str) = line.strip_prefix("data: ") {
-                                match serde_json::from_str::<StreamChunk>(json_str) {
-                                    Ok(chunk) => {
-                                        if let Some(choice) = chunk.choices.first() {
-                                            if let Some(delta) = &choice.delta {
-                                                // Text delta
-                                                if let Some(text) = &delta.content {
-                                                    let _ =
-                                                        tx.send(StreamEvent::ContentBlockDelta {
-                                                            index: 0,
-                                                            delta: ContentBlockDelta::TextDelta {
-                                                                text: text.clone(),
-                                                            },
-                                                        });
-                                                }
+                while let Some(chunk) = stream.next().await {
+                    match chunk {
+                        Ok(bytes) => {
+                            buffer.push_str(&String::from_utf8_lossy(&bytes));
 
-                                                for tc in &delta.tool_calls {
-                                                    let idx = tc.index as usize;
+                            while let Some(pos) = buffer.find('\n') {
+                                let line = buffer.drain(..=pos).collect::<String>();
+                                let line = line.trim();
 
-                                                    // Emit metadata when id/name arrive
-                                                    if let (Some(id), Some(name)) =
-                                                        (&tc.id, &tc.function.name)
-                                                    {
-                                                        let _ =
-                                                            tx.send(StreamEvent::ToolCallMeta {
-                                                                index: idx,
-                                                                id: id.clone(),
-                                                                name: name.clone(),
-                                                            });
-                                                    }
+                                if line.is_empty() || line.starts_with(':') {
+                                    continue;
+                                }
 
-                                                    // Emit argument deltas
-                                                    if let Some(args) = &tc.function.arguments {
+                                if line == "data: [DONE]" {
+                                    let _ = tx.send(StreamEvent::MessageStop);
+                                    return;
+                                }
+
+                                if let Some(json_str) = line.strip_prefix("data: ") {
+                                    match serde_json::from_str::<StreamChunk>(json_str) {
+                                        Ok(chunk) => {
+                                            if let Some(choice) = chunk.choices.first() {
+                                                if let Some(delta) = &choice.delta {
+                                                    if let Some(text) = &delta.content {
                                                         let _ = tx.send(
                                                             StreamEvent::ContentBlockDelta {
-                                                                index: idx,
-                                                                delta: ContentBlockDelta::InputJsonDelta {
-                                                                    partial_json: args.clone(),
-                                                                },
+                                                                index: 0,
+                                                                delta:
+                                                                    ContentBlockDelta::TextDelta {
+                                                                        text: text.clone(),
+                                                                    },
                                                             },
                                                         );
                                                     }
+
+                                                    for tc in &delta.tool_calls {
+                                                        let idx = tc.index as usize;
+
+                                                        if let (Some(id), Some(name)) =
+                                                            (&tc.id, &tc.function.name)
+                                                        {
+                                                            let _ = tx.send(
+                                                                StreamEvent::ToolCallMeta {
+                                                                    index: idx,
+                                                                    id: id.clone(),
+                                                                    name: name.clone(),
+                                                                },
+                                                            );
+                                                        }
+
+                                                        if let Some(args) = &tc.function.arguments {
+                                                            let _ = tx.send(
+                                                                StreamEvent::ContentBlockDelta {
+                                                                    index: idx,
+                                                                    delta: ContentBlockDelta::InputJsonDelta {
+                                                                        partial_json: args.clone(),
+                                                                    },
+                                                                },
+                                                            );
+                                                        }
+                                                    }
+                                                }
+
+                                                if let Some(reason) = &choice.finish_reason {
+                                                    let stop_reason = match reason.as_str() {
+                                                        "stop" => Some(StopReason::EndTurn),
+                                                        "tool_calls" => Some(StopReason::ToolUse),
+                                                        "length" => Some(StopReason::MaxTokens),
+                                                        _ => None,
+                                                    };
+                                                    let _ = tx.send(StreamEvent::MessageDelta {
+                                                        stop_reason,
+                                                        usage: None,
+                                                    });
                                                 }
                                             }
-
-                                            // Finish reason
-                                            if let Some(reason) = &choice.finish_reason {
-                                                let stop_reason = match reason.as_str() {
-                                                    "stop" => Some(StopReason::EndTurn),
-                                                    "tool_calls" => Some(StopReason::ToolUse),
-                                                    "length" => Some(StopReason::MaxTokens),
-                                                    _ => None,
-                                                };
-                                                let _ = tx.send(StreamEvent::MessageDelta {
-                                                    stop_reason,
-                                                    usage: None,
-                                                });
-                                            }
                                         }
-                                    }
-                                    Err(e) => {
-                                        let _ = tx.send(StreamEvent::Error {
-                                            message: format!("JSON parse error: {}", e),
-                                        });
+                                        Err(e) => {
+                                            let _ = tx.send(StreamEvent::Error {
+                                                message: format!("JSON parse error: {}", e),
+                                            });
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                    Err(e) => {
-                        let _ = tx.send(StreamEvent::Error {
-                            message: format!("Stream error: {}", e),
-                        });
+                        Err(e) => {
+                            let _ = tx.send(StreamEvent::Error {
+                                message: format!("Stream error: {}", e),
+                            });
+                        }
                     }
                 }
+
+                let _ = tx.send(StreamEvent::MessageStop);
+            });
+
+            Ok(
+                Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(rx))
+                    as Pin<Box<dyn Stream<Item = StreamEvent> + Send>>,
+            )
+        })
+    }
+
+    fn health_check(&self) -> BoxFuture<'_, Result<()>> {
+        let url = format!("{}/v1/chat/completions", self.base_url);
+        let model = self.model.clone();
+        let client = self.client.clone();
+
+        Box::pin(async move {
+            let body = serde_json::json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 1
+            });
+
+            let response = client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .with_context(|| format!("Cannot connect to llama.cpp server at {}", url))?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                anyhow::bail!("llama.cpp returned {}: {}", status, text);
             }
 
-            let _ = tx.send(StreamEvent::MessageStop);
-        });
-
-        Ok(Box::pin(
-            tokio_stream::wrappers::UnboundedReceiverStream::new(rx),
-        ))
+            Ok(())
+        })
     }
+}
 
-    pub async fn health_check(&self) -> Result<()> {
-        let url = format!("{}/v1/chat/completions", self.base_url);
-        let body = serde_json::json!({
-            "model": self.model,
-            "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 1
-        });
-
-        let response = self
-            .client
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("Cannot connect to llama.cpp server at {}", self.base_url))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            anyhow::bail!("llama.cpp returned {}: {}", status, text);
-        }
-
-        Ok(())
-    }
-
-    // Internal: build the JSON request body
+impl LlamaCppProvider {
     fn build_request_body(&self, request: ChatRequest) -> Result<serde_json::Value> {
         let mut messages = Vec::new();
 
@@ -346,7 +366,46 @@ impl LlamaCppProvider {
     }
 }
 
-// Lightweight structs for parsing the OpenAI-compatible SSE stream
+pub struct MockProvider {
+    turns: Vec<Vec<StreamEvent>>,
+    call_index: AtomicUsize,
+}
+
+impl MockProvider {
+    pub fn new(turns: Vec<Vec<StreamEvent>>) -> Self {
+        Self {
+            turns,
+            call_index: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Provider for MockProvider {
+    fn stream_chat(
+        &self,
+        _request: ChatRequest,
+    ) -> BoxFuture<'_, Result<Pin<Box<dyn Stream<Item = StreamEvent> + Send>>>> {
+        let idx = self.call_index.fetch_add(1, Ordering::SeqCst);
+        let events = self.turns.get(idx).cloned().unwrap_or_default();
+
+        Box::pin(async move {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            for event in events {
+                let _ = tx.send(event);
+            }
+            let _ = tx.send(StreamEvent::MessageStop);
+            Ok(
+                Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(rx))
+                    as Pin<Box<dyn Stream<Item = StreamEvent> + Send>>,
+            )
+        })
+    }
+
+    fn health_check(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move { Ok(()) })
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct StreamChunk {
     choices: Vec<StreamChoice>,

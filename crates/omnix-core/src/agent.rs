@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use crate::memory_store::MemoryStore;
 use crate::permissions::{AuthResult, PermissionEnforcer};
 use crate::prompt::SystemPromptBuilder;
-use crate::provider::{ChatRequest, ContentBlockDelta, LlamaCppProvider, StreamEvent};
+use crate::provider::{ChatRequest, ContentBlockDelta, Provider, StreamEvent};
 use crate::session::Session;
 use crate::tools::{ToolContext, ToolRegistry};
 
@@ -19,8 +19,8 @@ use crate::tools::{ToolContext, ToolRegistry};
 ///
 /// Receives `CoreCommand`s via an async channel, runs the ReAct agentic loop,
 /// and emits `CoreEvent`s back to the UI.
-pub struct AgentCore {
-    provider: LlamaCppProvider,
+pub struct AgentCore<P: Provider> {
+    provider: P,
     session: Session,
     tools: ToolRegistry,
     permissions: PermissionEnforcer,
@@ -29,9 +29,9 @@ pub struct AgentCore {
     max_iterations: usize,
 }
 
-impl AgentCore {
+impl<P: Provider> AgentCore<P> {
     pub fn new(
-        provider: LlamaCppProvider,
+        provider: P,
         model: String,
         tools: ToolRegistry,
         permissions: PermissionEnforcer,
@@ -95,7 +95,6 @@ impl AgentCore {
                     self.permissions.set_mode(mode);
                 }
                 CoreCommand::Shutdown => break,
-                // Other commands are handled inside execute_prompt or ignored at top level
                 _ => {}
             }
         }
@@ -120,7 +119,6 @@ impl AgentCore {
                 break;
             }
 
-            // Build system prompt with current memory snapshot
             let memory_snapshot = MemoryStore::load(&self.memory_store_path)
                 .ok()
                 .and_then(|m| {
@@ -159,7 +157,6 @@ impl AgentCore {
                 }
             };
 
-            // Accumulate the assistant response
             let mut text_buffer = String::new();
             let mut tool_meta: HashMap<usize, (String, String)> = HashMap::new();
             let mut tool_json: HashMap<usize, String> = HashMap::new();
@@ -186,7 +183,6 @@ impl AgentCore {
                         stop_reason: Some(reason),
                         ..
                     } => {
-                        // Build assistant message content
                         let mut content = vec![ContentBlock::Text {
                             text: text_buffer.clone(),
                         }];
@@ -227,7 +223,7 @@ impl AgentCore {
                         }
 
                         if reason == StopReason::ToolUse {
-                            break; // Execute tools below
+                            break;
                         }
                     }
                     StreamEvent::Error { message } => {
@@ -241,7 +237,6 @@ impl AgentCore {
                 }
             }
 
-            // Execute collected tool calls
             let ctx = ToolContext::default();
             let mut tool_results: Vec<(String, crate::tools::ToolOutput)> = Vec::new();
 
@@ -271,7 +266,6 @@ impl AgentCore {
                     input: input.clone(),
                 });
 
-                // Permission check
                 match self.permissions.authorize(name, &input) {
                     AuthResult::Allow => {}
                     AuthResult::Deny { reason } => {
@@ -316,7 +310,6 @@ impl AgentCore {
                     }
                 }
 
-                // Execute
                 match self.tools.execute(name, input, &ctx).await {
                     Ok(output) => {
                         let _ = self.event_tx.send(CoreEvent::ToolCallCompleted {
@@ -337,7 +330,6 @@ impl AgentCore {
                 }
             }
 
-            // Append tool results to session
             for (id, output) in tool_results {
                 self.session.push_message(ChatMessage::tool_result(
                     id,
@@ -345,8 +337,6 @@ impl AgentCore {
                     output.is_error,
                 ));
             }
-
-            // Loop back for next LLM turn
         }
     }
 
@@ -377,15 +367,21 @@ impl AgentCore {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::permissions::PermissionEnforcer;
     use crate::prompt::SystemPromptBuilder;
-    use crate::tools::ToolRegistry;
+    use crate::provider::{LlamaCppProvider, MockProvider};
+    use crate::tools::{Tool, ToolContext, ToolError, ToolOutput, ToolRegistry};
+    use futures::future::BoxFuture;
     use omnix_protocol::{CoreCommand, CoreEvent, PermissionMode};
+    use serde_json::json;
 
-    fn setup_core() -> (AgentCore, mpsc::UnboundedReceiver<CoreEvent>) {
+    fn setup_core_with_provider<P: Provider>(
+        provider: P,
+    ) -> (AgentCore<P>, mpsc::UnboundedReceiver<CoreEvent>) {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let provider = LlamaCppProvider::new("http://localhost:9999", "test-model");
         let tools = ToolRegistry::new();
         let permissions = PermissionEnforcer::new(PermissionMode::Allow);
         let prompt = SystemPromptBuilder::new(PermissionMode::Allow);
@@ -395,11 +391,19 @@ mod tests {
             "test".into(),
             tools,
             permissions,
-            prompt, // passed but ignored internally
+            prompt,
             PathBuf::from("/tmp/test_memory.md"),
             event_tx,
         );
         (core, event_rx)
+    }
+
+    fn setup_core() -> (
+        AgentCore<LlamaCppProvider>,
+        mpsc::UnboundedReceiver<CoreEvent>,
+    ) {
+        let provider = LlamaCppProvider::new("http://localhost:9999", "test-model");
+        setup_core_with_provider(provider)
     }
 
     #[tokio::test]
@@ -424,6 +428,242 @@ mod tests {
         cmd_tx.send(CoreCommand::Shutdown).unwrap();
 
         core.run(cmd_rx).await;
-        // Should exit cleanly
+    }
+
+    struct EchoTool;
+
+    impl Tool for EchoTool {
+        fn name(&self) -> &str {
+            "echo"
+        }
+
+        fn description(&self) -> &str {
+            "Echo back the input message"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            json!({
+                "type": "object",
+                "properties": {
+                    "message": { "type": "string" }
+                },
+                "required": ["message"]
+            })
+        }
+
+        fn required_permission(&self) -> PermissionMode {
+            PermissionMode::ReadOnly
+        }
+
+        fn execute(
+            &self,
+            input: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> BoxFuture<'_, anyhow::Result<ToolOutput, ToolError>> {
+            let msg = input["message"].as_str().unwrap_or("?").to_string();
+            Box::pin(async move { Ok(ToolOutput::ok(format!("Echo: {}", msg))) })
+        }
+    }
+
+    #[tokio::test]
+    async fn react_loop_full_cycle() {
+        // Turn 1: LLM emits text + tool call (echo), stops with ToolUse
+        let turn1 = vec![
+            StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: ContentBlockDelta::TextDelta {
+                    text: "I'll echo that.".into(),
+                },
+            },
+            StreamEvent::ToolCallMeta {
+                index: 0,
+                id: "call_1".into(),
+                name: "echo".into(),
+            },
+            StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: ContentBlockDelta::InputJsonDelta {
+                    partial_json: r#"{"message": "hello"}"#.into(),
+                },
+            },
+            StreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::ToolUse),
+                usage: None,
+            },
+        ];
+
+        // Turn 2: LLM sees tool result, responds with final text, stops with EndTurn
+        let turn2 = vec![
+            StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: ContentBlockDelta::TextDelta {
+                    text: "Done!".into(),
+                },
+            },
+            StreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::EndTurn),
+                usage: None,
+            },
+        ];
+
+        let provider = MockProvider::new(vec![turn1, turn2]);
+        let (mut core, mut event_rx) = setup_core_with_provider(provider);
+
+        // Register echo tool
+        core.tools.register(Arc::new(EchoTool));
+
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+
+        // Send prompt and shutdown after the turn completes
+        let shutdown_tx = cmd_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            let _ = shutdown_tx.send(CoreCommand::Shutdown);
+        });
+
+        cmd_tx
+            .send(CoreCommand::SendPrompt {
+                text: "say hello".into(),
+            })
+            .unwrap();
+
+        core.run(cmd_rx).await;
+
+        // Collect all events
+        let mut events = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+
+        // Verify the sequence
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, CoreEvent::TurnStarted { .. })),
+            "Expected TurnStarted"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, CoreEvent::TokenDelta { text } if text == "I'll echo that.")),
+            "Expected TokenDelta with thinking text"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, CoreEvent::ToolCallStarted { id, name, .. } if id == "call_1" && name == "echo")),
+            "Expected ToolCallStarted for echo"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, CoreEvent::ToolCallCompleted { id, .. } if id == "call_1")),
+            "Expected ToolCallCompleted for echo"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, CoreEvent::TokenDelta { text } if text == "Done!")),
+            "Expected TokenDelta with final text"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                CoreEvent::TurnEnded {
+                    stop_reason: StopReason::EndTurn,
+                    ..
+                }
+            )),
+            "Expected TurnEnded with EndTurn"
+        );
+
+        // Verify session state: user msg + assistant msg + tool result + assistant msg
+        assert_eq!(core.session.messages.len(), 4);
+        assert_eq!(core.session.messages[0].role, Role::User);
+        assert_eq!(core.session.messages[1].role, Role::Assistant);
+        assert_eq!(core.session.messages[2].role, Role::Tool);
+        assert_eq!(core.session.messages[3].role, Role::Assistant);
+    }
+
+    #[tokio::test]
+    async fn react_loop_approval_required() {
+        // Turn 1: LLM calls a tool that requires approval
+        let turn1 = vec![
+            StreamEvent::ToolCallMeta {
+                index: 0,
+                id: "call_1".into(),
+                name: "echo".into(),
+            },
+            StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: ContentBlockDelta::InputJsonDelta {
+                    partial_json: r#"{"message": "test"}"#.into(),
+                },
+            },
+            StreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::ToolUse),
+                usage: None,
+            },
+        ];
+
+        // Turn 2: after approval + execution, LLM responds
+        let turn2 = vec![
+            StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: ContentBlockDelta::TextDelta {
+                    text: "Approved!".into(),
+                },
+            },
+            StreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::EndTurn),
+                usage: None,
+            },
+        ];
+
+        let provider = MockProvider::new(vec![turn1, turn2]);
+        let (mut core, mut event_rx) = setup_core_with_provider(provider);
+
+        // Set Prompt mode so all tools require approval
+        core.permissions.set_mode(PermissionMode::Prompt);
+        core.tools.register(Arc::new(EchoTool));
+
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+
+        // Approve after a short delay (deterministic timing in test)
+        let cmd_tx2 = cmd_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let _ = cmd_tx2.send(CoreCommand::RespondToApproval {
+                call_id: "call_1".into(),
+                response: ApprovalResponse::AllowOnce,
+            });
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            let _ = cmd_tx2.send(CoreCommand::Shutdown);
+        });
+
+        cmd_tx
+            .send(CoreCommand::SendPrompt {
+                text: "test".into(),
+            })
+            .unwrap();
+
+        core.run(cmd_rx).await;
+
+        // Collect events
+        let mut events = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+
+        assert!(
+            events.iter().any(
+                |e| matches!(e, CoreEvent::ApprovalRequested { call_id, .. } if call_id == "call_1")
+            ),
+            "Expected ApprovalRequested"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, CoreEvent::ToolCallCompleted { id, .. } if id == "call_1")),
+            "Expected ToolCallCompleted after approval"
+        );
     }
 }
