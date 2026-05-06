@@ -68,8 +68,14 @@ pub struct LlamaCppProvider {
 
 impl LlamaCppProvider {
     pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| Client::new());
+
         Self {
-            client: Client::new(),
+            client,
             base_url: base_url.into(),
             model: model.into(),
         }
@@ -89,12 +95,12 @@ impl Provider for LlamaCppProvider {
         Box::pin(async move {
             let body = body?;
 
-            let response = client
-                .post(&url)
-                .json(&body)
-                .send()
-                .await
-                .with_context(|| format!("Failed to connect to llama.cpp server at {}", url))?;
+            let response = Self::retry(
+                || client.post(&url).json(&body).send(),
+                2,
+            )
+            .await
+            .with_context(|| format!("Failed to connect to llama.cpp server at {}", url))?;
 
             if !response.status().is_success() {
                 let status = response.status();
@@ -229,12 +235,12 @@ impl Provider for LlamaCppProvider {
                 "max_tokens": 1
             });
 
-            let response = client
-                .post(&url)
-                .json(&body)
-                .send()
-                .await
-                .with_context(|| format!("Cannot connect to llama.cpp server at {}", url))?;
+            let response = Self::retry(
+                || client.post(&url).json(&body).send(),
+                2,
+            )
+            .await
+            .with_context(|| format!("Cannot connect to llama.cpp server at {}", url))?;
 
             if !response.status().is_success() {
                 let status = response.status();
@@ -248,6 +254,32 @@ impl Provider for LlamaCppProvider {
 }
 
 impl LlamaCppProvider {
+    /// Retry an async operation with exponential backoff.
+    async fn retry<F, Fut>(operation: F, max_retries: u32) -> Result<reqwest::Response>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = reqwest::Result<reqwest::Response>>,
+    {
+        let mut last_error = None;
+        for attempt in 0..=max_retries {
+            match operation().await {
+                Ok(response) => return Ok(response),
+                Err(e) => {
+                    last_error = Some(e);
+                    if attempt < max_retries {
+                        let delay = std::time::Duration::from_millis(500 * 2u64.pow(attempt));
+                        tokio::time::sleep(delay).await;
+                    }
+                }
+            }
+        }
+        Err(anyhow::anyhow!(
+            "Failed after {} retries: {}",
+            max_retries,
+            last_error.unwrap()
+        ))
+    }
+
     fn build_request_body(&self, request: ChatRequest) -> Result<serde_json::Value> {
         let mut messages = Vec::new();
 
