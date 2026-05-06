@@ -34,6 +34,11 @@ pub enum StreamEvent {
         index: usize,
         delta: ContentBlockDelta,
     },
+    ToolCallMeta {
+        index: usize,
+        id: String,
+        name: String,
+    },
     MessageDelta {
         stop_reason: Option<StopReason>,
         usage: Option<TokenUsage>,
@@ -129,10 +134,25 @@ impl LlamaCppProvider {
                                                 }
 
                                                 for tc in &delta.tool_calls {
+                                                    let idx = tc.index as usize;
+
+                                                    // Emit metadata when id/name arrive
+                                                    if let (Some(id), Some(name)) =
+                                                        (&tc.id, &tc.function.name)
+                                                    {
+                                                        let _ =
+                                                            tx.send(StreamEvent::ToolCallMeta {
+                                                                index: idx,
+                                                                id: id.clone(),
+                                                                name: name.clone(),
+                                                            });
+                                                    }
+
+                                                    // Emit argument deltas
                                                     if let Some(args) = &tc.function.arguments {
                                                         let _ = tx.send(
                                                             StreamEvent::ContentBlockDelta {
-                                                                index: tc.index as usize,
+                                                                index: idx,
                                                                 delta: ContentBlockDelta::InputJsonDelta {
                                                                     partial_json: args.clone(),
                                                                 },
@@ -350,11 +370,15 @@ struct StreamDelta {
 #[derive(Debug, Deserialize)]
 struct StreamToolCallDelta {
     index: i32,
+    #[serde(default)]
+    id: Option<String>,
     function: StreamFunctionDelta,
 }
 
 #[derive(Debug, Deserialize)]
 struct StreamFunctionDelta {
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default)]
     arguments: Option<String>,
 }
