@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod config;
 pub mod memory_store;
 pub mod permissions;
 pub mod prompt;

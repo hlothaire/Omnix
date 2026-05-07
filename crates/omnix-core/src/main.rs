@@ -7,6 +7,7 @@ use omnix_protocol::{CoreCommand, CoreEvent, PermissionMode};
 use tokio::sync::mpsc;
 
 use omnix_core::agent::AgentCore;
+use omnix_core::config::AppConfig;
 use omnix_core::permissions::PermissionEnforcer;
 use omnix_core::prompt::SystemPromptBuilder;
 use omnix_core::provider::{AnyProvider, LlamaCppProvider};
@@ -20,37 +21,55 @@ use omnix_core::tools::{
 #[command(name = "omnix")]
 #[command(about = "Terminal agent harness powered by local LLMs")]
 struct Cli {
-    #[arg(short, long, default_value = "llama_cpp")]
-    provider: String,
+    #[arg(short, long)]
+    provider: Option<String>,
 
     #[arg(short, long)]
-    model: String,
+    model: Option<String>,
 
-    #[arg(short = 'H', long, default_value = "http://localhost:8080")]
-    host: String,
+    #[arg(short = 'H', long)]
+    host: Option<String>,
 
-    #[arg(short = 'M', long, default_value = "workspace-write")]
-    mode: String,
+    #[arg(short = 'M', long)]
+    mode: Option<String>,
 
-    #[arg(long, default_value = "~/.omnix/sessions")]
-    session_dir: String,
+    #[arg(long)]
+    session_dir: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    let permission_mode = parse_mode(&cli.mode);
-    let model = cli.model;
-    let host = cli.host;
+    // Load config and merge with CLI args (CLI overrides config)
+    let config = AppConfig::load().unwrap_or_default();
 
-    let session_dir = if cli.session_dir.starts_with("~/") {
-        dirs::home_dir()
-            .map(|h| h.join(&cli.session_dir[2..]))
-            .unwrap_or_else(|| PathBuf::from(&cli.session_dir))
-    } else {
-        PathBuf::from(&cli.session_dir)
-    };
+    let provider_kind = cli.provider.as_ref()
+        .unwrap_or(&config.provider.kind)
+        .clone();
+
+    let model = cli.model.as_ref()
+        .unwrap_or(&config.provider.model)
+        .clone();
+
+    if model.is_empty() {
+        eprintln!("{} No model specified. Either pass --model <MODEL> or set it in ~/.omnix/settings.toml", "✗".red());
+        std::process::exit(1);
+    }
+
+    let host = cli.host.as_ref()
+        .unwrap_or(&config.provider.host)
+        .clone();
+
+    let permission_mode = parse_mode(
+        cli.mode.as_ref()
+            .unwrap_or(&config.permissions.mode)
+    );
+
+    let session_dir = AppConfig::expand_home(
+        cli.session_dir.as_ref()
+            .unwrap_or(&config.session.directory)
+    )?;
 
     std::fs::create_dir_all(&session_dir)?;
 
@@ -64,16 +83,22 @@ async fn main() -> anyhow::Result<()> {
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<CoreEvent>();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<CoreCommand>();
 
-    let provider = match cli.provider.as_str() {
+    let (provider, final_host) = match provider_kind.as_str() {
         "ollama" => {
             let ollama_host = if host == "http://localhost:8080" {
                 "http://localhost:11434".to_string()
             } else {
                 host.clone()
             };
-            AnyProvider::Ollama(OllamaProvider::new(&ollama_host, &model))
+            (
+                AnyProvider::Ollama(OllamaProvider::new(&ollama_host, &model)),
+                ollama_host,
+            )
         }
-        _ => AnyProvider::LlamaCpp(LlamaCppProvider::new(&host, &model)),
+        _ => (
+            AnyProvider::LlamaCpp(LlamaCppProvider::new(&host, &model)),
+            host.clone(),
+        ),
     };
 
     let mut tools = ToolRegistry::new();
@@ -111,9 +136,10 @@ async fn main() -> anyhow::Result<()> {
         "Terminal Agent Harness".dimmed()
     );
     println!(
-        "Model: {} | Host: {} | Mode: {}\n",
+        "Provider: {} | Model: {} | Host: {} | Mode: {}\n",
+        provider_kind.bright_cyan(),
         model.bright_green(),
-        host.bright_blue(),
+        final_host.bright_blue(),
         format!("{:?}", permission_mode).bright_yellow()
     );
 
