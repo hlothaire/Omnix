@@ -9,7 +9,8 @@ use tokio::sync::mpsc;
 use omnix_core::agent::AgentCore;
 use omnix_core::permissions::PermissionEnforcer;
 use omnix_core::prompt::SystemPromptBuilder;
-use omnix_core::provider::LlamaCppProvider;
+use omnix_core::provider::{AnyProvider, LlamaCppProvider};
+use omnix_core::provider::ollama::OllamaProvider;
 use omnix_core::tools::{
     ToolRegistry, bash::Bash, file_edit::EditFile, file_read::ReadFile, file_write::WriteFile,
     glob::Glob, memory::MemoryTool,
@@ -19,6 +20,9 @@ use omnix_core::tools::{
 #[command(name = "omnix")]
 #[command(about = "Terminal agent harness powered by local LLMs")]
 struct Cli {
+    #[arg(short, long, default_value = "llama_cpp")]
+    provider: String,
+
     #[arg(short, long)]
     model: String,
 
@@ -60,7 +64,17 @@ async fn main() -> anyhow::Result<()> {
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<CoreEvent>();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<CoreCommand>();
 
-    let provider = LlamaCppProvider::new(&host, &model);
+    let provider = match cli.provider.as_str() {
+        "ollama" => {
+            let ollama_host = if host == "http://localhost:8080" {
+                "http://localhost:11434".to_string()
+            } else {
+                host.clone()
+            };
+            AnyProvider::Ollama(OllamaProvider::new(&ollama_host, &model))
+        }
+        _ => AnyProvider::LlamaCpp(LlamaCppProvider::new(&host, &model)),
+    };
 
     let mut tools = ToolRegistry::new();
     tools.register(Arc::new(Bash));
