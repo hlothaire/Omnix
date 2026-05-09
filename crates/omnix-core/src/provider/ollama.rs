@@ -124,6 +124,45 @@ impl Provider for OllamaProvider {
             Ok(payload.models.into_iter().map(|m| m.name).collect())
         })
     }
+
+    fn summarize(&self, text: String, max_tokens: u32) -> BoxFuture<'_, Result<String>> {
+        let url = format!("{}/v1/chat/completions", self.base_url);
+        let model = self.model.clone();
+        let client = self.client.clone();
+
+        Box::pin(async move {
+            let body = serde_json::json!({
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "You are a summarization assistant. Create a concise, structured summary of the conversation provided by the user. Preserve key facts, decisions, file paths, and next steps."},
+                    {"role": "user", "content": text}
+                ],
+                "max_tokens": max_tokens,
+                "temperature": 0.3,
+                "stream": false
+            });
+
+            let response = retry_request(|| client.post(&url).json(&body).send(), 2)
+                .await
+                .with_context(|| format!("Failed to summarize with Ollama at {}", url))?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                anyhow::bail!("Ollama returned {}: {}", status, text);
+            }
+
+            let payload: serde_json::Value = response.json().await
+                .with_context(|| "Failed to parse summarization response")?;
+
+            let summary = payload["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+
+            Ok(summary)
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]

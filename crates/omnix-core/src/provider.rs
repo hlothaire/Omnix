@@ -23,6 +23,8 @@ pub trait Provider: Send + Sync {
     fn context_window(&self) -> BoxFuture<'_, Result<usize>>;
 
     fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>>>;
+
+    fn summarize(&self, text: String, max_tokens: u32) -> BoxFuture<'_, Result<String>>;
 }
 
 pub struct ChatRequest {
@@ -435,7 +437,7 @@ impl Provider for LlamaCppProvider {
         Box::pin(async move {
             let response = retry_request(|| client.get(&url).send(), 2)
                 .await
-                .with_context(|| format!("Cannot query models at {}", url))?;
+                .with_context(|| format!("Cannot query model at {}", url))?;
 
             if !response.status().is_success() {
                 let status = response.status();
@@ -449,6 +451,47 @@ impl Provider for LlamaCppProvider {
                 .with_context(|| "Failed to parse /v1/models response")?;
 
             Ok(payload.data.into_iter().map(|m| m.id).collect())
+        })
+    }
+
+    fn summarize(&self, text: String, max_tokens: u32) -> BoxFuture<'_, Result<String>> {
+        let url = format!("{}/v1/chat/completions", self.base_url);
+        let model = self.model.clone();
+        let client = self.client.clone();
+
+        Box::pin(async move {
+            let body = serde_json::json!({
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "You are a summarization assistant. Create a concise, structured summary of the conversation provided by the user. Preserve key facts, decisions, file paths, and next steps."},
+                    {"role": "user", "content": text}
+                ],
+                "max_tokens": max_tokens,
+                "temperature": 0.3,
+                "stream": false
+            });
+
+            let response = retry_request(|| client.post(&url).json(&body).send(), 2)
+                .await
+                .with_context(|| format!("Failed to summarize with llama.cpp at {}", url))?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                anyhow::bail!("llama.cpp returned {}: {}", status, text);
+            }
+
+            let payload: serde_json::Value = response
+                .json()
+                .await
+                .with_context(|| "Failed to parse summarization response")?;
+
+            let summary = payload["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+
+            Ok(summary)
         })
     }
 }
@@ -506,6 +549,13 @@ impl Provider for AnyProvider {
             AnyProvider::Ollama(p) => p.list_models(),
         }
     }
+
+    fn summarize(&self, text: String, max_tokens: u32) -> BoxFuture<'_, Result<String>> {
+        match self {
+            AnyProvider::LlamaCpp(p) => p.summarize(text, max_tokens),
+            AnyProvider::Ollama(p) => p.summarize(text, max_tokens),
+        }
+    }
 }
 
 pub struct MockProvider {
@@ -553,6 +603,12 @@ impl Provider for MockProvider {
 
     fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>>> {
         Box::pin(async move { Ok(vec!["mock-model".to_string()]) })
+    }
+
+    fn summarize(&self, _text: String, _max_tokens: u32) -> BoxFuture<'_, Result<String>> {
+        Box::pin(async move {
+            Ok("Mock summary: the conversation covered various topics and tasks.".to_string())
+        })
     }
 }
 

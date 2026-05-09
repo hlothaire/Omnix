@@ -119,6 +119,43 @@ impl<P: Provider> AgentCore<P> {
                 break;
             }
 
+            // Check if compaction is needed
+            if let Ok(context_window) = self.provider.context_window().await {
+                let threshold = (context_window * 75) / 100;
+                if self.session.estimated_tokens() > threshold {
+                    let split_idx = self.session.find_split_index(6);
+                    if split_idx > 0 {
+                        // Serialize old messages for summarization
+                        let old_messages: Vec<ChatMessage> = self.session.messages[..split_idx].to_vec();
+                        let conversation_text = old_messages.iter()
+                            .map(|m| format!("{:?}: {:?}", m.role, m.content))
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
+
+                        let summary_prompt = format!(
+                            "Summarize the following conversation concisely. Preserve key facts, decisions, file paths, errors, and next steps.\n\n{}",
+                            conversation_text
+                        );
+
+                        match self.provider.summarize(summary_prompt, 512).await {
+                            Ok(summary) => {
+                                let removed = self.session.compact(split_idx, summary.clone());
+                                let _ = self.event_tx.send(CoreEvent::SessionCompacted {
+                                    summary: summary.clone(),
+                                    removed_count: removed,
+                                });
+                            }
+                            Err(e) => {
+                                let _ = self.event_tx.send(CoreEvent::ApiError {
+                                    message: format!("Compaction failed: {}", e),
+                                    retryable: false,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
             let memory_snapshot = MemoryStore::load(&self.memory_store_path)
                 .ok()
                 .and_then(|m| {
