@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// Top-level application configuration loaded from `~/.omnix/settings.toml`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct AppConfig {
     #[serde(default)]
     pub provider: ProviderConfig,
@@ -16,18 +16,6 @@ pub struct AppConfig {
     pub compaction: CompactionConfig,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            provider: ProviderConfig::default(),
-            permissions: PermissionConfig::default(),
-            session: SessionConfig::default(),
-            compaction: CompactionConfig::default(),
-            telemetry: TelemetryConfig::default(),
-        }
-    }
 }
 
 impl AppConfig {
@@ -72,9 +60,10 @@ impl AppConfig {
     }
 
     pub fn expand_home(path: &str) -> Result<PathBuf> {
-        if path.starts_with("~/") {
-            let home = dirs::home_dir().context("Failed to determine home directory")?;
-            Ok(home.join(&path[2..]))
+        if let Some(stripped) = path.strip_prefix("~/") {
+            let home = dirs::home_dir()
+                .context("Failed to determine home directory")?;
+            Ok(home.join(stripped))
         } else {
             Ok(PathBuf::from(path))
         }

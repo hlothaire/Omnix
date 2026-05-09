@@ -14,7 +14,7 @@ use omnix_core::provider::{AnyProvider, LlamaCppProvider};
 use omnix_core::provider::ollama::OllamaProvider;
 use omnix_core::tools::{
     ToolRegistry, bash::Bash, file_edit::EditFile, file_read::ReadFile, file_write::WriteFile,
-    glob::Glob, memory::MemoryTool,
+    glob::Glob, grep::Grep, list_dir::ListDir, memory::MemoryTool,
 };
 
 #[derive(Parser, Debug)]
@@ -107,6 +107,8 @@ async fn main() -> anyhow::Result<()> {
     tools.register(Arc::new(WriteFile));
     tools.register(Arc::new(EditFile));
     tools.register(Arc::new(Glob));
+    tools.register(Arc::new(Grep));
+    tools.register(Arc::new(ListDir));
     tools.register(Arc::new(MemoryTool::new(&memory_path)));
 
     let permissions = PermissionEnforcer::new(permission_mode);
