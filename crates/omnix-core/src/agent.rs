@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use futures::StreamExt;
 use omnix_protocol::{
@@ -13,6 +14,7 @@ use crate::permissions::{AuthResult, PermissionEnforcer};
 use crate::prompt::SystemPromptBuilder;
 use crate::provider::{ChatRequest, ContentBlockDelta, Provider, StreamEvent};
 use crate::session::Session;
+use crate::telemetry::TelemetrySink;
 use crate::tools::{ToolContext, ToolRegistry};
 
 /// The central agent orchestrator.
@@ -26,6 +28,7 @@ pub struct AgentCore<P: Provider> {
     permissions: PermissionEnforcer,
     memory_store_path: PathBuf,
     event_tx: mpsc::UnboundedSender<CoreEvent>,
+    telemetry: Option<TelemetrySink>,
     max_iterations: usize,
 }
 
@@ -46,8 +49,14 @@ impl<P: Provider> AgentCore<P> {
             permissions,
             memory_store_path,
             event_tx,
+            telemetry: None,
             max_iterations: 25,
         }
+    }
+
+    pub fn with_telemetry(mut self, sink: TelemetrySink) -> Self {
+        self.telemetry = Some(sink);
+        self
     }
 
     /// Run the main command loop. Blocks until `Shutdown` is received.
@@ -105,6 +114,11 @@ impl<P: Provider> AgentCore<P> {
         prompt: String,
         command_rx: &mut mpsc::UnboundedReceiver<CoreCommand>,
     ) {
+        let session_id = self.session.id.clone();
+        if let Some(ref telemetry) = self.telemetry {
+            telemetry.log_prompt(&session_id, &prompt);
+        }
+
         self.session.push_message(ChatMessage::user(prompt));
 
         let mut iterations = 0;
@@ -115,12 +129,16 @@ impl<P: Provider> AgentCore<P> {
                 let _ = self.event_tx.send(CoreEvent::MaxIterationsReached {
                     limit: self.max_iterations,
                 });
+                let msg = format!(
+                    "Agent stopped after {} iterations to prevent runaway loops. \
+                     Consider breaking your request into smaller steps.",
+                    self.max_iterations
+                );
+                if let Some(ref telemetry) = self.telemetry {
+                    telemetry.log_error(&self.session.id, &msg, false);
+                }
                 let _ = self.event_tx.send(CoreEvent::ApiError {
-                    message: format!(
-                        "Agent stopped after {} iterations to prevent runaway loops. \
-                         Consider breaking your request into smaller steps.",
-                        self.max_iterations
-                    ),
+                    message: msg,
                     retryable: false,
                 });
                 break;
@@ -151,6 +169,9 @@ impl<P: Provider> AgentCore<P> {
                                     summary: summary.clone(),
                                     removed_count: removed,
                                 });
+                                if let Some(ref telemetry) = self.telemetry {
+                                    telemetry.log_compaction(&self.session.id, removed, &summary);
+                                }
                             }
                             Err(e) => {
                                 let _ = self.event_tx.send(CoreEvent::ApiError {
@@ -193,6 +214,9 @@ impl<P: Provider> AgentCore<P> {
             let mut stream = match self.provider.stream_chat(request).await {
                 Ok(s) => s,
                 Err(e) => {
+                    if let Some(ref telemetry) = self.telemetry {
+                        telemetry.log_error(&self.session.id, &e.to_string(), true);
+                    }
                     let _ = self.event_tx.send(CoreEvent::ApiError {
                         message: e.to_string(),
                         retryable: true,
@@ -271,6 +295,9 @@ impl<P: Provider> AgentCore<P> {
                         }
                     }
                     StreamEvent::Error { message } => {
+                        if let Some(ref telemetry) = self.telemetry {
+                            telemetry.log_error(&self.session.id, &message, true);
+                        }
                         let _ = self.event_tx.send(CoreEvent::ApiError {
                             message,
                             retryable: true,
@@ -309,6 +336,9 @@ impl<P: Provider> AgentCore<P> {
                     name: name.clone(),
                     input: input.clone(),
                 });
+                if let Some(ref telemetry) = self.telemetry {
+                    telemetry.log_tool_call(&self.session.id, name, &input);
+                }
 
                 match self.permissions.authorize(name, &input) {
                     AuthResult::Allow => {}
@@ -354,20 +384,41 @@ impl<P: Provider> AgentCore<P> {
                     }
                 }
 
+                let tool_start = Instant::now();
                 match self.tools.execute(name, input, &ctx).await {
                     Ok(output) => {
+                        let duration_ms = tool_start.elapsed().as_millis() as u64;
                         let _ = self.event_tx.send(CoreEvent::ToolCallCompleted {
                             id: id.clone(),
                             name: name.clone(),
                             output: omnix_protocol::ToolResultContent::ok(output.content.clone()),
                         });
+                        if let Some(ref telemetry) = self.telemetry {
+                            telemetry.log_tool_result(
+                                &self.session.id,
+                                name,
+                                &output.content,
+                                output.is_error,
+                                duration_ms,
+                            );
+                        }
                         tool_results.push((id.clone(), output));
                     }
                     Err(e) => {
+                        let duration_ms = tool_start.elapsed().as_millis() as u64;
                         let _ = self.event_tx.send(CoreEvent::ToolError {
                             call_id: id.clone(),
                             message: e.to_string(),
                         });
+                        if let Some(ref telemetry) = self.telemetry {
+                            telemetry.log_tool_result(
+                                &self.session.id,
+                                name,
+                                &e.to_string(),
+                                true,
+                                duration_ms,
+                            );
+                        }
                         tool_results
                             .push((id.clone(), crate::tools::ToolOutput::err(e.to_string())));
                     }

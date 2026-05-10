@@ -12,6 +12,7 @@ use omnix_core::permissions::PermissionEnforcer;
 use omnix_core::prompt::SystemPromptBuilder;
 use omnix_core::provider::{AnyProvider, LlamaCppProvider};
 use omnix_core::provider::ollama::OllamaProvider;
+use omnix_core::telemetry::TelemetrySink;
 use omnix_core::tools::{
     ToolRegistry, bash::Bash, file_edit::EditFile, file_read::ReadFile, file_write::WriteFile,
     glob::Glob, grep::Grep, list_dir::ListDir, memory::MemoryTool,
@@ -126,6 +127,14 @@ async fn main() -> anyhow::Result<()> {
         memory_path.clone(),
         event_tx.clone(),
     );
+
+    // Attach telemetry if enabled
+    if config.telemetry.enabled {
+        let telemetry_path = AppConfig::expand_home(&config.telemetry.path)?;
+        let max_size_bytes = config.telemetry.max_file_size_mb * 1024 * 1024;
+        let telemetry = TelemetrySink::new(telemetry_path, max_size_bytes);
+        core = core.with_telemetry(telemetry);
+    }
 
     let core_handle = tokio::spawn(async move {
         core.run(cmd_rx).await;

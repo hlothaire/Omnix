@@ -163,18 +163,32 @@ fn default_keep_recent() -> usize {
 pub struct TelemetryConfig {
     #[serde(default = "default_telemetry_enabled")]
     pub enabled: bool,
+    #[serde(default = "default_telemetry_path")]
+    pub path: String,
+    #[serde(default = "default_telemetry_max_size_mb")]
+    pub max_file_size_mb: u64,
 }
 
 impl Default for TelemetryConfig {
     fn default() -> Self {
         Self {
             enabled: default_telemetry_enabled(),
+            path: default_telemetry_path(),
+            max_file_size_mb: default_telemetry_max_size_mb(),
         }
     }
 }
 
 fn default_telemetry_enabled() -> bool {
     false
+}
+
+fn default_telemetry_path() -> String {
+    "~/.omnix/telemetry.jsonl".to_string()
+}
+
+fn default_telemetry_max_size_mb() -> u64 {
+    10
 }
 
 #[cfg(test)]
@@ -193,6 +207,8 @@ mod tests {
         assert_eq!(config.compaction.threshold_percent, 75);
         assert_eq!(config.compaction.keep_recent_messages, 6);
         assert_eq!(config.telemetry.enabled, false);
+        assert_eq!(config.telemetry.path, "~/.omnix/telemetry.jsonl");
+        assert_eq!(config.telemetry.max_file_size_mb, 10);
     }
 
     #[test]
@@ -215,6 +231,8 @@ keep_recent_messages = 10
 
 [telemetry]
 enabled = true
+path = "~/custom/telemetry.jsonl"
+max_file_size_mb = 5
 "#;
 
         let config: AppConfig = toml::from_str(toml).unwrap();
@@ -226,6 +244,8 @@ enabled = true
         assert_eq!(config.compaction.threshold_percent, 80);
         assert_eq!(config.compaction.keep_recent_messages, 10);
         assert_eq!(config.telemetry.enabled, true);
+        assert_eq!(config.telemetry.path, "~/custom/telemetry.jsonl");
+        assert_eq!(config.telemetry.max_file_size_mb, 5);
     }
 
     #[test]
@@ -299,5 +319,7 @@ model = "llama3.1:8b"
             parsed.compaction.keep_recent_messages
         );
         assert_eq!(config.telemetry.enabled, parsed.telemetry.enabled);
+        assert_eq!(config.telemetry.path, parsed.telemetry.path);
+        assert_eq!(config.telemetry.max_file_size_mb, parsed.telemetry.max_file_size_mb);
     }
 }
