@@ -76,4 +76,5 @@ pub enum CoreEvent {
         target: MemoryTarget,
         reason: String,
     },
+    MaxIterationsReached { limit: usize },
 }

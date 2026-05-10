@@ -161,4 +161,17 @@ mod tests {
         assert_eq!(config.user_char_limit, 1375);
         assert!(config.security_scan);
     }
+
+    #[test]
+    fn max_iterations_reached_roundtrip() {
+        let event = CoreEvent::MaxIterationsReached { limit: 25 };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"event\":\"max_iterations_reached\""));
+        assert!(json.contains("\"limit\":25"));
+        let decoded: CoreEvent = serde_json::from_str(&json).unwrap();
+        match decoded {
+            CoreEvent::MaxIterationsReached { limit } => assert_eq!(limit, 25),
+            _ => panic!("wrong variant"),
+        }
+    }
 }
