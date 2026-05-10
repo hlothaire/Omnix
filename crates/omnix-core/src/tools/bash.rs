@@ -50,6 +50,20 @@ impl Tool for Bash {
 
         Box::pin(async move {
             let cmd_str = cmd_str?;
+            
+            if cmd_str.trim().is_empty() {
+                return Err(ToolError::InvalidInput("command cannot be empty".into()));
+            }
+            
+            // Check for dangerous system paths in commands like `rm -rf /etc/...`
+            let dangerous_patterns = ["/etc/passwd", "/etc/shadow", "/etc/hosts", "/proc/", "/sys/"];
+            for pattern in &dangerous_patterns {
+                if cmd_str.contains(pattern) {
+                    return Err(ToolError::InvalidInput(
+                        format!("command contains protected system path: {}", pattern)
+                    ));
+                }
+            }
 
             let output = match timeout(
                 dur,
@@ -163,6 +177,22 @@ mod tests {
         let tool = Bash;
         let ctx = ToolContext::default();
         let result = tool.execute(json!({"cmd": "echo hello"}), &ctx).await;
+        assert!(matches!(result, Err(ToolError::InvalidInput(_))));
+    }
+
+    #[tokio::test]
+    async fn bash_empty_command() {
+        let tool = Bash;
+        let ctx = ToolContext::default();
+        let result = tool.execute(json!({"command": ""}), &ctx).await;
+        assert!(matches!(result, Err(ToolError::InvalidInput(_))));
+    }
+
+    #[tokio::test]
+    async fn bash_dangerous_path() {
+        let tool = Bash;
+        let ctx = ToolContext::default();
+        let result = tool.execute(json!({"command": "cat /etc/passwd"}), &ctx).await;
         assert!(matches!(result, Err(ToolError::InvalidInput(_))));
     }
 }

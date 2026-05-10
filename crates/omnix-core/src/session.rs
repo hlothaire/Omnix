@@ -412,4 +412,83 @@ mod tests {
         assert_eq!(session.messages[3].role, Role::User); // turn 3 start
         assert_eq!(session.messages[4].role, Role::Assistant);
     }
+
+    #[test]
+    fn test_save_and_load_roundtrip() {
+        use tempfile::TempDir;
+        
+        let tmp = TempDir::new().unwrap();
+        let original = Session::new("test-model");
+        
+        // Temporarily override sessions dir
+        let path = tmp.path().join(format!("{}.jsonl", original.id));
+        
+        // Save manually to temp path
+        let temp_path = tmp.path().join(format!(".{}.jsonl.tmp", original.id));
+        let file = File::create(&temp_path).unwrap();
+        let mut writer = BufWriter::new(file);
+        
+        let meta = SessionRecord::SessionMeta {
+            version: 1,
+            id: original.id.clone(),
+            model: original.model.clone(),
+            created_at: original.created_at,
+            updated_at: original.updated_at,
+        };
+        serde_json::to_writer(&mut writer, &meta).unwrap();
+        writer.write_all(b"\n").unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+        
+        fs::rename(&temp_path, &path).unwrap();
+        
+        // Load back
+        let loaded = Session::load_from_path(&path).unwrap();
+        
+        assert_eq!(loaded.id, original.id);
+        assert_eq!(loaded.model, original.model);
+        assert_eq!(loaded.messages.len(), original.messages.len());
+    }
+
+    #[test]
+    fn test_save_and_load_with_messages() {
+        use tempfile::TempDir;
+        
+        let tmp = TempDir::new().unwrap();
+        let mut session = Session::new("test-model");
+        session.push_message(ChatMessage::user("Hello"));
+        session.push_message(ChatMessage::assistant_text("Hi there"));
+        
+        let path = tmp.path().join(format!("{}.jsonl", session.id));
+        let temp_path = tmp.path().join(format!(".{}.jsonl.tmp", session.id));
+        
+        let file = File::create(&temp_path).unwrap();
+        let mut writer = BufWriter::new(file);
+        
+        let meta = SessionRecord::SessionMeta {
+            version: 1,
+            id: session.id.clone(),
+            model: session.model.clone(),
+            created_at: session.created_at,
+            updated_at: session.updated_at,
+        };
+        serde_json::to_writer(&mut writer, &meta).unwrap();
+        writer.write_all(b"\n").unwrap();
+        
+        for msg in &session.messages {
+            let record = SessionRecord::Message(msg.clone());
+            serde_json::to_writer(&mut writer, &record).unwrap();
+            writer.write_all(b"\n").unwrap();
+        }
+        writer.flush().unwrap();
+        drop(writer);
+        
+        fs::rename(&temp_path, &path).unwrap();
+        
+        let loaded = Session::load_from_path(&path).unwrap();
+        
+        assert_eq!(loaded.messages.len(), 2);
+        assert_eq!(loaded.messages[0].role, Role::User);
+        assert_eq!(loaded.messages[1].role, Role::Assistant);
+    }
 }

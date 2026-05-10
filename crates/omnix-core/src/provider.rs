@@ -365,7 +365,16 @@ impl Provider for LlamaCppProvider {
             if !response.status().is_success() {
                 let status = response.status();
                 let text = response.text().await.unwrap_or_default();
-                anyhow::bail!("llama.cpp returned {}: {}", status, text);
+                let hint = if status.as_u16() == 404 {
+                    " (Hint: Model not loaded on server. Check llama.cpp is running with the correct model.)"
+                } else if status.as_u16() == 503 {
+                    " (Hint: Server is overloaded or model is still loading.)"
+                } else if status.as_u16() == 401 {
+                    " (Hint: Authentication required. Check API key if configured.)"
+                } else {
+                    ""
+                };
+                anyhow::bail!("llama.cpp returned {}: {}{}", status, text, hint);
             }
 
             Ok(parse_sse_stream(response, model))

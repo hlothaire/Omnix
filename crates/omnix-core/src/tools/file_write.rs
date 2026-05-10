@@ -95,7 +95,24 @@ fn resolve_path(value: &serde_json::Value, cwd: &Path) -> Result<std::path::Path
     let s = value
         .as_str()
         .ok_or_else(|| ToolError::InvalidInput("Missing 'path' field".into()))?;
+    
+    if s.trim().is_empty() {
+        return Err(ToolError::InvalidInput("path cannot be empty".into()));
+    }
+    
     let path = Path::new(s);
+    
+    // Prevent writing to system files
+    let path_str = path.to_string_lossy();
+    let dangerous = ["/etc/passwd", "/etc/shadow", "/etc/hosts"];
+    for pattern in &dangerous {
+        if path_str.contains(pattern) {
+            return Err(ToolError::InvalidInput(
+                format!("cannot write to protected system file: {}", pattern)
+            ));
+        }
+    }
+    
     if path.is_absolute() {
         Ok(path.to_path_buf())
     } else {
@@ -168,6 +185,22 @@ mod tests {
         let tool = WriteFile;
         let ctx = ToolContext::default();
         let result = tool.execute(json!({"path": "foo.txt"}), &ctx).await;
+        assert!(matches!(result, Err(ToolError::InvalidInput(_))));
+    }
+
+    #[tokio::test]
+    async fn write_file_empty_path() {
+        let tool = WriteFile;
+        let ctx = ToolContext::default();
+        let result = tool.execute(json!({"path": "", "content": "test"}), &ctx).await;
+        assert!(matches!(result, Err(ToolError::InvalidInput(_))));
+    }
+
+    #[tokio::test]
+    async fn write_file_system_path() {
+        let tool = WriteFile;
+        let ctx = ToolContext::default();
+        let result = tool.execute(json!({"path": "/etc/passwd", "content": "x"}), &ctx).await;
         assert!(matches!(result, Err(ToolError::InvalidInput(_))));
     }
 }

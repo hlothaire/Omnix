@@ -52,7 +52,16 @@ impl Provider for OllamaProvider {
             if !response.status().is_success() {
                 let status = response.status();
                 let text = response.text().await.unwrap_or_default();
-                anyhow::bail!("Ollama returned {}: {}", status, text);
+                let hint = if status.as_u16() == 404 {
+                    " (Hint: Model not found. Run 'ollama pull <model>' first.)"
+                } else if status.as_u16() == 500 && text.contains("model") {
+                    " (Hint: Model not loaded. Try running 'ollama run <model>' first.)"
+                } else if status.as_u16() == 503 {
+                    " (Hint: Ollama is still loading the model. Wait a moment and retry.)"
+                } else {
+                    ""
+                };
+                anyhow::bail!("Ollama returned {}: {}{}", status, text, hint);
             }
 
             Ok(parse_sse_stream(response, model))

@@ -112,8 +112,15 @@ impl<P: Provider> AgentCore<P> {
         loop {
             iterations += 1;
             if iterations > self.max_iterations {
+                let _ = self.event_tx.send(CoreEvent::MaxIterationsReached {
+                    limit: self.max_iterations,
+                });
                 let _ = self.event_tx.send(CoreEvent::ApiError {
-                    message: "Max iterations reached".into(),
+                    message: format!(
+                        "Agent stopped after {} iterations to prevent runaway loops. \
+                         Consider breaking your request into smaller steps.",
+                        self.max_iterations
+                    ),
                     retryable: false,
                 });
                 break;

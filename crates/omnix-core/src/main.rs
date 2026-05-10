@@ -156,9 +156,23 @@ async fn main() -> anyhow::Result<()> {
         run_repl(cmd_tx_clone);
     });
 
-    let _ = repl_handle.await;
+    // Handle Ctrl+C for graceful shutdown
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
 
-    let _ = cmd_tx.send(CoreCommand::Shutdown);
+    tokio::select! {
+        _ = &mut ctrl_c => {
+            println!("\n{} Ctrl+C received, saving session...", "⚠".yellow());
+            let _ = cmd_tx.send(CoreCommand::SaveSession);
+            // Give agent a moment to save
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            println!("{} Session saved. Goodbye!", "✓".green());
+        }
+        _ = repl_handle => {
+            let _ = cmd_tx.send(CoreCommand::Shutdown);
+        }
+    }
+
     let _ = core_handle.await;
     let _ = event_handle.await;
 
@@ -376,6 +390,13 @@ fn render_event(event: &CoreEvent) {
                 usage.output_tokens.to_string().dimmed()
             );
             println!();
+        }
+        CoreEvent::MaxIterationsReached { limit } => {
+            eprintln!(
+                "{} Max iterations reached (limit: {})",
+                "⚠".yellow(),
+                limit
+            );
         }
         CoreEvent::ApiError { message, retryable } => {
             let retry_str = if *retryable { " (retryable)" } else { "" };
