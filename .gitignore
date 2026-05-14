@@ -27,3 +27,12 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+# Node / Frontend
+node_modules
+/dist/
+omnix-ui/dist/
+
+# Tauri generated
+omnix-ui/src-tauri/gen/
+omnix-ui/src-tauri/icons/

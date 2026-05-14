@@ -441,7 +441,9 @@ impl Provider for LlamaCppProvider {
         Box::pin(async move {
             let response = retry_request(|| client.get(&props_url).send(), 1)
                 .await
-                .with_context(|| format!("Cannot query llama.cpp runtime properties at {}", props_url))?;
+                .with_context(|| {
+                    format!("Cannot query llama.cpp runtime properties at {}", props_url)
+                })?;
 
             if !response.status().is_success() {
                 let status = response.status();
@@ -454,10 +456,9 @@ impl Provider for LlamaCppProvider {
                 .await
                 .with_context(|| "Failed to parse /props response")?;
 
-            props
-                .context_size()
-                .map(|n| n as usize)
-                .with_context(|| "llama.cpp /props response did not include active runtime context size")
+            props.context_size().map(|n| n as usize).with_context(
+                || "llama.cpp /props response did not include active runtime context size",
+            )
         })
     }
 
@@ -549,13 +550,11 @@ struct LlamaPropsResponse {
 
 impl LlamaPropsResponse {
     fn context_size(&self) -> Option<u64> {
-        self.n_ctx
-            .or(self.context_length)
-            .or_else(|| {
-                self.default_generation_settings
-                    .as_ref()
-                    .and_then(|s| s.context_size())
-            })
+        self.n_ctx.or(self.context_length).or_else(|| {
+            self.default_generation_settings
+                .as_ref()
+                .and_then(|s| s.context_size())
+        })
     }
 }
 
