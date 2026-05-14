@@ -1,0 +1,20 @@
+[data-theme="catppuccin-macchiato"] {
+  --color-bg-primary: #24273a;
+  --color-bg-secondary: #1e2030;
+  --color-bg-tertiary: #363a4f;
+  --color-bg-hover: rgba(255, 255, 255, 0.06);
+  --color-text-primary: #cad3f5;
+  --color-text-secondary: #a5adcb;
+  --color-text-muted: #6e738d;
+  --color-accent: #c6a0f6;
+  --color-accent-hover: #b7bdf8;
+  --color-border: rgba(255, 255, 255, 0.10);
+  --color-danger: #ed8796;
+  --color-success: #a6da95;
+  --color-warning: #eed49f;
+  --color-tool-bg: #363a4f;
+  --color-thinking: #8aadf4;
+  --color-sidebar-bg: #1e2030;
+  --color-sidebar-hover: rgba(255, 255, 255, 0.06);
+  --color-input-bg: #363a4f;
+}

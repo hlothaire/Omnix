@@ -109,12 +109,39 @@ fn resolve_path(value: &serde_json::Value, cwd: &Path) -> Result<std::path::Path
     let s = value
         .as_str()
         .ok_or_else(|| ToolError::InvalidInput("Missing 'path' field".into()))?;
-    let path = Path::new(s);
-    if path.is_absolute() {
-        Ok(path.to_path_buf())
-    } else {
-        Ok(cwd.join(path))
+
+    if s.is_empty() {
+        return Err(ToolError::InvalidInput("Path cannot be empty".into()));
     }
+
+    let path = Path::new(s);
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+
+    // Protect system paths
+    let canonical = resolved.canonicalize().unwrap_or_else(|_| resolved.clone());
+    let protected = [
+        "/etc/passwd",
+        "/etc/shadow",
+        "/etc/hosts",
+        "/proc",
+        "/sys",
+        "/dev",
+    ];
+    let canonical_str = canonical.to_string_lossy();
+    for p in &protected {
+        if canonical_str.starts_with(p) {
+            return Err(ToolError::InvalidInput(format!(
+                "Access to system path '{}' is not allowed",
+                canonical_str
+            )));
+        }
+    }
+
+    Ok(resolved)
 }
 
 #[cfg(test)]

@@ -73,10 +73,11 @@ impl SystemPromptBuilder {
 fn default_identity() -> String {
     r#"# Identity
 
-You are Omnix, an interactive agentic assistant running in a terminal.
-You help the user read, write, and edit files, run shell commands, and manage projects.
+You are Omnix, a desktop AI agent. You help with software engineering tasks:
+reading, writing, and editing files, running shell commands, and managing projects.
 
-You operate in a local-first environment using a local LLM via llama.cpp.
+Use tools to explore the codebase,
+run commands, and make changes directly.
 "#
     .to_string()
 }
@@ -142,6 +143,10 @@ Rules:
 - Combine multiple tool calls in a single turn when they are independent.
 - Wait for tool results before making the next set of calls.
 - If a tool returns an error, analyze it and try a different approach.
+- Tool results are already visible to the user in the app's tool cards. Do not
+  repeat raw command output, file contents, search matches, or long lists from
+  tool results unless the user explicitly asks for the raw output. Instead,
+  summarize the outcome, call out important findings, and state the next action.
 - Keep file reads focused: use offset/limit for large files.
 - For edits, prefer `edit_file` (search/replace) over `write_file` when
   modifying existing files, to avoid overwriting unrelated content.
@@ -164,7 +169,7 @@ mod tests {
         let builder = SystemPromptBuilder::new(PermissionMode::WorkspaceWrite);
         let prompt = builder.build();
         assert!(prompt.contains("Omnix"));
-        assert!(prompt.contains("interactive agentic assistant"));
+        assert!(prompt.contains("desktop AI agent"));
     }
 
     #[test]
@@ -259,5 +264,6 @@ mod tests {
         let prompt = builder.build();
         assert!(prompt.contains("Tool Usage Instructions"));
         assert!(prompt.contains("Use tools proactively"));
+        assert!(prompt.contains("Tool results are already visible"));
     }
 }

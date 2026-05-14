@@ -1,0 +1,20 @@
+[data-theme="default"] {
+  --color-bg-primary: var(--bg);
+  --color-bg-secondary: var(--surface);
+  --color-bg-tertiary: var(--surface-2);
+  --color-bg-hover: var(--hover);
+  --color-text-primary: var(--fg);
+  --color-text-secondary: var(--dim);
+  --color-text-muted: color-mix(in srgb, var(--dim) 60%, transparent);
+  --color-accent: var(--accent);
+  --color-accent-hover: color-mix(in srgb, var(--accent) 80%, white);
+  --color-border: var(--border);
+  --color-danger: var(--err);
+  --color-success: var(--hl2);
+  --color-warning: var(--hl3);
+  --color-tool-bg: var(--surface);
+  --color-thinking: var(--dim);
+  --color-sidebar-bg: var(--rail);
+  --color-sidebar-hover: var(--hover);
+  --color-input-bg: var(--surface-2);
+}

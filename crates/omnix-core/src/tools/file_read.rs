@@ -87,24 +87,25 @@ fn resolve_path(value: &serde_json::Value, cwd: &Path) -> Result<std::path::Path
     let s = value
         .as_str()
         .ok_or_else(|| ToolError::InvalidInput("Missing 'path' field".into()))?;
-    
+
     if s.trim().is_empty() {
         return Err(ToolError::InvalidInput("path cannot be empty".into()));
     }
-    
+
     let path = Path::new(s);
-    
+
     // Check for protected system paths
     let path_str = path.to_string_lossy();
     let dangerous = ["/etc/passwd", "/etc/shadow", "/etc/hosts"];
     for pattern in &dangerous {
         if path_str.contains(pattern) {
-            return Err(ToolError::InvalidInput(
-                format!("cannot access protected system file: {}", pattern)
-            ));
+            return Err(ToolError::InvalidInput(format!(
+                "cannot access protected system file: {}",
+                pattern
+            )));
         }
     }
-    
+
     if path.is_absolute() {
         Ok(path.to_path_buf())
     } else {
@@ -127,8 +128,10 @@ mod tests {
         writeln!(tmp, "line3").unwrap();
 
         let tool = ReadFile;
-        let mut ctx = ToolContext::default();
-        ctx.working_directory = std::env::temp_dir();
+        let ctx = ToolContext {
+            working_directory: std::env::temp_dir(),
+            ..Default::default()
+        };
 
         let out = tool
             .execute(

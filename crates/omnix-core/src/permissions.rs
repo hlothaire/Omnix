@@ -1,4 +1,5 @@
 use omnix_protocol::{PermissionMode, RiskLevel};
+use std::collections::HashSet;
 
 /// Result of a permission check.
 #[derive(Debug, Clone, PartialEq)]
@@ -17,11 +18,15 @@ pub enum AuthResult {
 /// Layered permission enforcement for tool execution.
 pub struct PermissionEnforcer {
     mode: PermissionMode,
+    session_allowed: HashSet<String>,
 }
 
 impl PermissionEnforcer {
     pub fn new(mode: PermissionMode) -> Self {
-        Self { mode }
+        Self {
+            mode,
+            session_allowed: HashSet::new(),
+        }
     }
 
     pub fn mode(&self) -> PermissionMode {
@@ -30,15 +35,17 @@ impl PermissionEnforcer {
 
     pub fn set_mode(&mut self, mode: PermissionMode) {
         self.mode = mode;
+        self.session_allowed.clear();
     }
 
-    /// Check if a tool call is allowed under the current permission mode.
-    ///
-    /// Returns:
-    /// - `Allow` if the tool is permitted under the current mode.
-    /// - `Deny` if the tool is forbidden (e.g. bash in ReadOnly mode).
-    /// - `Ask` if the tool exceeds the current mode and requires human approval.
+    pub fn allow_for_session(&mut self, tool_name: &str) {
+        self.session_allowed.insert(tool_name.to_string());
+    }
+
     pub fn authorize(&self, tool_name: &str, tool_input: &serde_json::Value) -> AuthResult {
+        if self.session_allowed.contains(tool_name) {
+            return AuthResult::Allow;
+        }
         let tool_level = required_permission(tool_name, tool_input);
 
         match self.mode {

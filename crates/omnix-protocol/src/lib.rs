@@ -15,7 +15,7 @@ pub use event::CoreEvent;
 pub use memory::{MemoryConfig, MemoryEntry, MemoryResult};
 pub use message::{ChatMessage, ContentBlock, Role};
 pub use tool::{ToolChoice, ToolDefinition};
-pub use types::{TokenUsage, ToolResultContent};
+pub use types::{SessionListEntry, TokenUsage, ToolResultContent};
 
 #[cfg(test)]
 mod tests {
@@ -23,7 +23,9 @@ mod tests {
 
     #[test]
     fn event_roundtrip() {
-        let event = CoreEvent::TokenDelta { text: "hello".into() };
+        let event = CoreEvent::TokenDelta {
+            text: "hello".into(),
+        };
         let json = serde_json::to_string(&event).unwrap();
         let decoded: CoreEvent = serde_json::from_str(&json).unwrap();
         let json2 = serde_json::to_string(&decoded).unwrap();
@@ -32,7 +34,9 @@ mod tests {
 
     #[test]
     fn command_roundtrip() {
-        let cmd = CoreCommand::SendPrompt { text: "list files".into() };
+        let cmd = CoreCommand::SendPrompt {
+            text: "list files".into(),
+        };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains("\"command\":\"send_prompt\""));
         let decoded: CoreCommand = serde_json::from_str(&json).unwrap();

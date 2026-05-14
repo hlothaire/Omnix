@@ -61,8 +61,7 @@ impl AppConfig {
 
     pub fn expand_home(path: &str) -> Result<PathBuf> {
         if let Some(stripped) = path.strip_prefix("~/") {
-            let home = dirs::home_dir()
-                .context("Failed to determine home directory")?;
+            let home = dirs::home_dir().context("Failed to determine home directory")?;
             Ok(home.join(stripped))
         } else {
             Ok(PathBuf::from(path))
@@ -91,11 +90,11 @@ impl Default for ProviderConfig {
 }
 
 fn default_provider_kind() -> String {
-    "llama_cpp".to_string()
+    String::new()
 }
 
 fn default_host() -> String {
-    "http://localhost:8080".to_string()
+    String::new()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -136,27 +135,41 @@ fn default_session_dir() -> String {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CompactionConfig {
-    #[serde(default = "default_threshold_percent")]
-    pub threshold_percent: u8,
-    #[serde(default = "default_keep_recent")]
-    pub keep_recent_messages: usize,
+    #[serde(default = "default_requested_output_tokens")]
+    pub requested_output_tokens: u32,
+    #[serde(default = "default_min_safety_margin_tokens")]
+    pub min_safety_margin_tokens: usize,
+    #[serde(default = "default_safety_margin_percent")]
+    pub safety_margin_percent: u8,
+    #[serde(default = "default_max_keep_recent_tokens")]
+    pub max_keep_recent_tokens: usize,
 }
 
 impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
-            threshold_percent: default_threshold_percent(),
-            keep_recent_messages: default_keep_recent(),
+            requested_output_tokens: default_requested_output_tokens(),
+            min_safety_margin_tokens: default_min_safety_margin_tokens(),
+            safety_margin_percent: default_safety_margin_percent(),
+            max_keep_recent_tokens: default_max_keep_recent_tokens(),
         }
     }
 }
 
-fn default_threshold_percent() -> u8 {
-    75
+fn default_requested_output_tokens() -> u32 {
+    4096
 }
 
-fn default_keep_recent() -> usize {
-    6
+fn default_min_safety_margin_tokens() -> usize {
+    512
+}
+
+fn default_safety_margin_percent() -> u8 {
+    5
+}
+
+fn default_max_keep_recent_tokens() -> usize {
+    20_000
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -199,14 +212,16 @@ mod tests {
     #[test]
     fn test_config_default_values() {
         let config = AppConfig::default();
-        assert_eq!(config.provider.kind, "llama_cpp");
-        assert_eq!(config.provider.host, "http://localhost:8080");
+        assert_eq!(config.provider.kind, "");
+        assert_eq!(config.provider.host, "");
         assert_eq!(config.provider.model, "");
         assert_eq!(config.permissions.mode, "workspace-write");
         assert_eq!(config.session.directory, "~/.omnix/sessions");
-        assert_eq!(config.compaction.threshold_percent, 75);
-        assert_eq!(config.compaction.keep_recent_messages, 6);
-        assert_eq!(config.telemetry.enabled, false);
+        assert_eq!(config.compaction.requested_output_tokens, 4096);
+        assert_eq!(config.compaction.min_safety_margin_tokens, 512);
+        assert_eq!(config.compaction.safety_margin_percent, 5);
+        assert_eq!(config.compaction.max_keep_recent_tokens, 20_000);
+        assert!(!config.telemetry.enabled);
         assert_eq!(config.telemetry.path, "~/.omnix/telemetry.jsonl");
         assert_eq!(config.telemetry.max_file_size_mb, 10);
     }
@@ -226,8 +241,10 @@ mode = "readonly"
 directory = "~/custom/sessions"
 
 [compaction]
-threshold_percent = 80
-keep_recent_messages = 10
+requested_output_tokens = 2048
+min_safety_margin_tokens = 256
+safety_margin_percent = 10
+max_keep_recent_tokens = 12000
 
 [telemetry]
 enabled = true
@@ -241,9 +258,11 @@ max_file_size_mb = 5
         assert_eq!(config.provider.model, "qwen2.5:0.5b");
         assert_eq!(config.permissions.mode, "readonly");
         assert_eq!(config.session.directory, "~/custom/sessions");
-        assert_eq!(config.compaction.threshold_percent, 80);
-        assert_eq!(config.compaction.keep_recent_messages, 10);
-        assert_eq!(config.telemetry.enabled, true);
+        assert_eq!(config.compaction.requested_output_tokens, 2048);
+        assert_eq!(config.compaction.min_safety_margin_tokens, 256);
+        assert_eq!(config.compaction.safety_margin_percent, 10);
+        assert_eq!(config.compaction.max_keep_recent_tokens, 12_000);
+        assert!(config.telemetry.enabled);
         assert_eq!(config.telemetry.path, "~/custom/telemetry.jsonl");
         assert_eq!(config.telemetry.max_file_size_mb, 5);
     }
@@ -257,12 +276,12 @@ model = "llama3.1:8b"
 
         let config: AppConfig = toml::from_str(toml).unwrap();
         // Provider: model overridden, rest defaults
-        assert_eq!(config.provider.kind, "llama_cpp");
-        assert_eq!(config.provider.host, "http://localhost:8080");
+        assert_eq!(config.provider.kind, "");
+        assert_eq!(config.provider.host, "");
         assert_eq!(config.provider.model, "llama3.1:8b");
         // Rest: all defaults
         assert_eq!(config.permissions.mode, "workspace-write");
-        assert_eq!(config.compaction.threshold_percent, 75);
+        assert_eq!(config.compaction.requested_output_tokens, 4096);
     }
 
     #[test]
@@ -311,15 +330,26 @@ model = "llama3.1:8b"
         assert_eq!(config.permissions.mode, parsed.permissions.mode);
         assert_eq!(config.session.directory, parsed.session.directory);
         assert_eq!(
-            config.compaction.threshold_percent,
-            parsed.compaction.threshold_percent
+            config.compaction.requested_output_tokens,
+            parsed.compaction.requested_output_tokens
         );
         assert_eq!(
-            config.compaction.keep_recent_messages,
-            parsed.compaction.keep_recent_messages
+            config.compaction.min_safety_margin_tokens,
+            parsed.compaction.min_safety_margin_tokens
+        );
+        assert_eq!(
+            config.compaction.safety_margin_percent,
+            parsed.compaction.safety_margin_percent
+        );
+        assert_eq!(
+            config.compaction.max_keep_recent_tokens,
+            parsed.compaction.max_keep_recent_tokens
         );
         assert_eq!(config.telemetry.enabled, parsed.telemetry.enabled);
         assert_eq!(config.telemetry.path, parsed.telemetry.path);
-        assert_eq!(config.telemetry.max_file_size_mb, parsed.telemetry.max_file_size_mb);
+        assert_eq!(
+            config.telemetry.max_file_size_mb,
+            parsed.telemetry.max_file_size_mb
+        );
     }
 }

@@ -70,7 +70,7 @@ impl Tool for MemoryTool {
     }
 
     fn required_permission(&self) -> PermissionMode {
-        PermissionMode::ReadOnly
+        PermissionMode::WorkspaceWrite
     }
 
     fn execute(
@@ -113,8 +113,10 @@ impl Tool for MemoryTool {
                     store
                         .replace(&old, &new)
                         .map_err(|e| ToolError::Other(format!("Cannot replace memory: {}", e)))?;
-                    Ok(ToolOutput::ok(format!("Replaced memory entry matching '{}'", old))
-                        .with_metadata("new_content", json!(new)))
+                    Ok(
+                        ToolOutput::ok(format!("Replaced memory entry matching '{}'", old))
+                            .with_metadata("new_content", json!(new)),
+                    )
                 }
                 "remove" => {
                     let old = old_text.ok_or_else(|| {
@@ -124,8 +126,10 @@ impl Tool for MemoryTool {
                         .remove(&old)
                         .map_err(|e| ToolError::Other(format!("Cannot remove memory: {}", e)))?;
                     let usage = format!("{} entries", store.entries().len());
-                    Ok(ToolOutput::ok(format!("Removed memory entry matching '{}'", old))
-                        .with_metadata("usage", json!(usage)))
+                    Ok(
+                        ToolOutput::ok(format!("Removed memory entry matching '{}'", old))
+                            .with_metadata("usage", json!(usage)),
+                    )
                 }
                 other => Err(ToolError::InvalidInput(format!(
                     "Unknown memory action: '{}'. Use add, replace, or remove.",
@@ -177,7 +181,10 @@ mod tests {
             .unwrap();
 
         assert!(out.content.contains("Replaced"));
-        assert_eq!(out.metadata.get("new_content").unwrap(), &json!("User likes Rust"));
+        assert_eq!(
+            out.metadata.get("new_content").unwrap(),
+            &json!("User likes Rust")
+        );
     }
 
     #[tokio::test]

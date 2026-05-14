@@ -4,17 +4,29 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum MemoryResult {
-    Success { message: String, new_usage: String },
+    Success {
+        message: String,
+        new_usage: String,
+    },
     CapacityExceeded {
         current_chars: usize,
         limit: usize,
         entry_chars: usize,
         current_entries: Vec<String>,
     },
-    Duplicate { message: String },
-    NotFound { message: String },
-    MultipleMatch { matches: Vec<String>, message: String },
-    SecurityBlocked { reason: String },
+    Duplicate {
+        message: String,
+    },
+    NotFound {
+        message: String,
+    },
+    MultipleMatch {
+        matches: Vec<String>,
+        message: String,
+    },
+    SecurityBlocked {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

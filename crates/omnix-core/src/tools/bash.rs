@@ -50,18 +50,25 @@ impl Tool for Bash {
 
         Box::pin(async move {
             let cmd_str = cmd_str?;
-            
+
             if cmd_str.trim().is_empty() {
                 return Err(ToolError::InvalidInput("command cannot be empty".into()));
             }
-            
+
             // Check for dangerous system paths in commands like `rm -rf /etc/...`
-            let dangerous_patterns = ["/etc/passwd", "/etc/shadow", "/etc/hosts", "/proc/", "/sys/"];
+            let dangerous_patterns = [
+                "/etc/passwd",
+                "/etc/shadow",
+                "/etc/hosts",
+                "/proc/",
+                "/sys/",
+            ];
             for pattern in &dangerous_patterns {
                 if cmd_str.contains(pattern) {
-                    return Err(ToolError::InvalidInput(
-                        format!("command contains protected system path: {}", pattern)
-                    ));
+                    return Err(ToolError::InvalidInput(format!(
+                        "command contains protected system path: {}",
+                        pattern
+                    )));
                 }
             }
 
@@ -96,22 +103,10 @@ impl Tool for Bash {
                 content.push_str(&stderr);
             }
 
-            // Truncate if excessively large
-            const MAX_LEN: usize = 10_240;
-            let truncated = if content.len() > MAX_LEN {
-                format!(
-                    "{}\n... (truncated, {} lines total)",
-                    &content[..MAX_LEN],
-                    content.lines().count()
-                )
-            } else {
-                content
-            };
-
             let mut result = if output.status.success() {
-                ToolOutput::ok(truncated)
+                ToolOutput::ok(content)
             } else {
-                ToolOutput::err(truncated)
+                ToolOutput::err(content)
             };
 
             result.metadata.insert("exit_code".into(), json!(exit_code));
@@ -122,9 +117,9 @@ impl Tool for Bash {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
     use super::*;
     use serde_json::json;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn bash_echo() {
@@ -166,8 +161,10 @@ mod tests {
     #[tokio::test]
     async fn bash_timeout() {
         let tool = Bash;
-        let mut ctx = ToolContext::default();
-        ctx.timeout = Duration::from_millis(50);
+        let ctx = ToolContext {
+            timeout: Duration::from_millis(50),
+            ..Default::default()
+        };
         let result = tool.execute(json!({"command": "sleep 5"}), &ctx).await;
         assert!(matches!(result, Err(ToolError::Timeout(_))));
     }
@@ -192,7 +189,9 @@ mod tests {
     async fn bash_dangerous_path() {
         let tool = Bash;
         let ctx = ToolContext::default();
-        let result = tool.execute(json!({"command": "cat /etc/passwd"}), &ctx).await;
+        let result = tool
+            .execute(json!({"command": "cat /etc/passwd"}), &ctx)
+            .await;
         assert!(matches!(result, Err(ToolError::InvalidInput(_))));
     }
 }

@@ -258,9 +258,7 @@ mod tests {
         let list_dir = ListDir;
         let ctx = ToolContext::default();
 
-        let result = list_dir
-            .execute(json!({"path": "nonexistent"}), &ctx)
-            .await;
+        let result = list_dir.execute(json!({"path": "nonexistent"}), &ctx).await;
 
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ToolError::Io(_)));
@@ -277,9 +275,7 @@ mod tests {
             ..ToolContext::default()
         };
 
-        let result = list_dir
-            .execute(json!({"path": "file.txt"}), &ctx)
-            .await;
+        let result = list_dir.execute(json!({"path": "file.txt"}), &ctx).await;
 
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ToolError::Io(_)));

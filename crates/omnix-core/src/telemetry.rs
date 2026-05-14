@@ -298,7 +298,11 @@ mod tests {
         let sink = TelemetrySink::new(path.clone(), 1024 * 1024);
 
         sink.log_prompt("test-session", "Hello world");
-        sink.log_tool_call("test-session", "bash", &serde_json::json!({"command": "ls"}));
+        sink.log_tool_call(
+            "test-session",
+            "bash",
+            &serde_json::json!({"command": "ls"}),
+        );
         sink.log_tool_result("test-session", "bash", "file.txt\nfile2.txt", false, 150);
         sink.log_usage("test-session", 100, 50);
         sink.log_error("test-session", "Something went wrong", false);
@@ -327,7 +331,10 @@ mod tests {
 
         // Write enough to trigger rotation
         for i in 0..20 {
-            sink.log_prompt("test-session", &format!("Message number {} with some padding", i));
+            sink.log_prompt(
+                "test-session",
+                &format!("Message number {} with some padding", i),
+            );
         }
 
         tokio::time::sleep(Duration::from_millis(100)).await;

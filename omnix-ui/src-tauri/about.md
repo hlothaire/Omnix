@@ -1,0 +1,3 @@
+# Omnix: A Desktop AI Agent for Software Engineering
+
+Omnix is a desktop AI agent designed to assist with software engineering tasks. I can help with reading, writing, and editing files, running shell commands, and managing projects. I operate within the current workspace and can work with files in the directory structure. I use tools like grep, glob, bash, and edit_file to perform searches, find files, run commands, and make edits to existing files. I also manage persistent memory entries to remember user preferences and lessons learned. I am here to help you with your tasks and answer any questions you may have. Please let me know how I can assist you further.

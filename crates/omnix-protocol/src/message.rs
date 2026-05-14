@@ -4,17 +4,22 @@ use crate::enums::StopReason;
 use crate::types::TokenUsage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "PascalCase")]
 pub enum Role {
+    #[serde(alias = "user")]
     User,
+    #[serde(alias = "assistant")]
     Assistant,
+    #[serde(alias = "tool")]
     Tool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -23,10 +28,14 @@ pub enum ContentBlock {
     ToolResult {
         tool_use_id: String,
         content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_content: Option<String>,
         #[serde(default)]
         is_error: bool,
     },
-    Thinking { thinking: String },
+    Thinking {
+        thinking: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -75,11 +84,21 @@ impl ChatMessage {
         content: impl Into<String>,
         is_error: bool,
     ) -> Self {
+        Self::tool_result_with_model_content(tool_use_id, content, None::<String>, is_error)
+    }
+
+    pub fn tool_result_with_model_content(
+        tool_use_id: impl Into<String>,
+        content: impl Into<String>,
+        model_content: Option<impl Into<String>>,
+        is_error: bool,
+    ) -> Self {
         Self {
             role: Role::Tool,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: tool_use_id.into(),
                 content: content.into(),
+                model_content: model_content.map(Into::into),
                 is_error,
             }],
             usage: None,

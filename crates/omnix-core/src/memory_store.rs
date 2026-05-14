@@ -138,7 +138,7 @@ impl MemoryStore {
         &self.entries
     }
 
-    fn save(&self) -> Result<()> {
+    pub fn save(&self) -> Result<()> {
         let content = self.entries.join("\n");
         if !content.is_empty() {
             let tmp = self.path.with_extension("tmp");

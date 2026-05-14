@@ -151,13 +151,14 @@ fn build_request_body(model: &str, request: ChatRequest) -> Result<serde_json::V
                     if let ContentBlock::ToolResult {
                         tool_use_id,
                         content,
+                        model_content,
                         ..
                     } = block
                     {
                         messages.push(serde_json::json!({
                             "role": "tool",
                             "tool_call_id": tool_use_id,
-                            "content": content
+                            "content": model_content.unwrap_or(content)
                         }));
                     }
                 }
@@ -209,6 +210,9 @@ fn build_request_body(model: &str, request: ChatRequest) -> Result<serde_json::V
         body["temperature"] = temp.into();
     }
 
+    // Request usage stats in streaming responses (supported by llama.cpp, OpenAI, etc.)
+    body["stream_options"] = serde_json::json!({"include_usage": true});
+
     Ok(body)
 }
 
@@ -249,6 +253,19 @@ fn parse_sse_stream(
                         if let Some(json_str) = line.strip_prefix("data: ") {
                             match serde_json::from_str::<StreamChunk>(json_str) {
                                 Ok(chunk) => {
+                                    // Capture usage from any chunk that provides it
+                                    if let Some(ref u) = chunk.usage {
+                                        let _ = tx.send(StreamEvent::MessageDelta {
+                                            stop_reason: None,
+                                            usage: Some(TokenUsage {
+                                                input_tokens: u.prompt_tokens,
+                                                output_tokens: u.completion_tokens,
+                                                cache_creation_tokens: 0,
+                                                cache_read_tokens: 0,
+                                            }),
+                                        });
+                                    }
+
                                     if let Some(choice) = chunk.choices.first() {
                                         if let Some(delta) = &choice.delta {
                                             if let Some(text) = &delta.content {
@@ -293,9 +310,15 @@ fn parse_sse_stream(
                                                 "length" => Some(StopReason::MaxTokens),
                                                 _ => None,
                                             };
+                                            let usage = chunk.usage.as_ref().map(|u| TokenUsage {
+                                                input_tokens: u.prompt_tokens,
+                                                output_tokens: u.completion_tokens,
+                                                cache_creation_tokens: 0,
+                                                cache_read_tokens: 0,
+                                            });
                                             let _ = tx.send(StreamEvent::MessageDelta {
                                                 stop_reason,
-                                                usage: None,
+                                                usage,
                                             });
                                         }
                                     }
@@ -351,9 +374,13 @@ impl Provider for LlamaCppProvider {
         request: ChatRequest,
     ) -> BoxFuture<'_, Result<Pin<Box<dyn Stream<Item = StreamEvent> + Send>>>> {
         let url = format!("{}/v1/chat/completions", self.base_url);
-        let body = build_request_body(&self.model, request);
+        let model = if request.model.is_empty() {
+            self.model.clone()
+        } else {
+            request.model.clone()
+        };
+        let body = build_request_body(&model, request);
         let client = self.client.clone();
-        let model = self.model.clone();
 
         Box::pin(async move {
             let body = body?;
@@ -408,14 +435,13 @@ impl Provider for LlamaCppProvider {
     }
 
     fn context_window(&self) -> BoxFuture<'_, Result<usize>> {
-        let url = format!("{}/v1/models", self.base_url);
-        let model = self.model.clone();
+        let props_url = format!("{}/props", self.base_url);
         let client = self.client.clone();
 
         Box::pin(async move {
-            let response = retry_request(|| client.get(&url).send(), 2)
+            let response = retry_request(|| client.get(&props_url).send(), 1)
                 .await
-                .with_context(|| format!("Cannot query models at {}", url))?;
+                .with_context(|| format!("Cannot query llama.cpp runtime properties at {}", props_url))?;
 
             if !response.status().is_success() {
                 let status = response.status();
@@ -423,19 +449,15 @@ impl Provider for LlamaCppProvider {
                 anyhow::bail!("llama.cpp returned {}: {}", status, text);
             }
 
-            let payload: LlamaModelsResponse = response
+            let props: LlamaPropsResponse = response
                 .json()
                 .await
-                .with_context(|| "Failed to parse /v1/models response")?;
+                .with_context(|| "Failed to parse /props response")?;
 
-            for m in payload.data {
-                if m.id == model {
-                    return Ok(m.meta.n_ctx_train as usize);
-                }
-            }
-
-            // Fallback: try to read from the loaded model metadata
-            anyhow::bail!("Model '{}' not found in /v1/models response", model)
+            props
+                .context_size()
+                .map(|n| n as usize)
+                .with_context(|| "llama.cpp /props response did not include active runtime context size")
         })
     }
 
@@ -513,18 +535,80 @@ struct LlamaModelsResponse {
 #[derive(Debug, Deserialize)]
 struct LlamaModelInfo {
     id: String,
-    meta: LlamaModelMeta,
 }
 
-#[derive(Debug, Deserialize)]
-struct LlamaModelMeta {
+#[derive(Debug, Deserialize, Default)]
+struct LlamaPropsResponse {
     #[serde(default)]
-    n_ctx_train: u64,
+    n_ctx: Option<u64>,
+    #[serde(default)]
+    context_length: Option<u64>,
+    #[serde(default)]
+    default_generation_settings: Option<LlamaGenerationSettings>,
+}
+
+impl LlamaPropsResponse {
+    fn context_size(&self) -> Option<u64> {
+        self.n_ctx
+            .or(self.context_length)
+            .or_else(|| {
+                self.default_generation_settings
+                    .as_ref()
+                    .and_then(|s| s.context_size())
+            })
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct LlamaGenerationSettings {
+    #[serde(default)]
+    n_ctx: Option<u64>,
+    #[serde(default)]
+    params: Option<LlamaGenerationParams>,
+}
+
+impl LlamaGenerationSettings {
+    fn context_size(&self) -> Option<u64> {
+        self.n_ctx
+            .or_else(|| self.params.as_ref().and_then(|p| p.n_ctx))
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct LlamaGenerationParams {
+    #[serde(default)]
+    n_ctx: Option<u64>,
 }
 
 pub enum AnyProvider {
     LlamaCpp(LlamaCppProvider),
     Ollama(ollama::OllamaProvider),
+    #[doc(hidden)]
+    Mock(MockProvider),
+}
+
+impl AnyProvider {
+    pub fn from_kind(kind: &str, host: &str, model: &str) -> Result<Self> {
+        match kind {
+            "ollama" => {
+                let h = if host == "http://localhost:8080" || host.is_empty() {
+                    "http://localhost:11434"
+                } else {
+                    host
+                };
+                Ok(AnyProvider::Ollama(ollama::OllamaProvider::new(h, model)))
+            }
+            "llama_cpp" | "llamacpp" => {
+                let h = if host == "http://localhost:11434" || host.is_empty() {
+                    "http://localhost:8080"
+                } else {
+                    host
+                };
+                Ok(AnyProvider::LlamaCpp(LlamaCppProvider::new(h, model)))
+            }
+            _ => anyhow::bail!("Unknown provider kind: {}", kind),
+        }
+    }
 }
 
 impl Provider for AnyProvider {
@@ -535,6 +619,7 @@ impl Provider for AnyProvider {
         match self {
             AnyProvider::LlamaCpp(p) => p.stream_chat(request),
             AnyProvider::Ollama(p) => p.stream_chat(request),
+            AnyProvider::Mock(p) => p.stream_chat(request),
         }
     }
 
@@ -542,6 +627,7 @@ impl Provider for AnyProvider {
         match self {
             AnyProvider::LlamaCpp(p) => p.health_check(),
             AnyProvider::Ollama(p) => p.health_check(),
+            AnyProvider::Mock(p) => p.health_check(),
         }
     }
 
@@ -549,6 +635,7 @@ impl Provider for AnyProvider {
         match self {
             AnyProvider::LlamaCpp(p) => p.context_window(),
             AnyProvider::Ollama(p) => p.context_window(),
+            AnyProvider::Mock(p) => p.context_window(),
         }
     }
 
@@ -556,6 +643,7 @@ impl Provider for AnyProvider {
         match self {
             AnyProvider::LlamaCpp(p) => p.list_models(),
             AnyProvider::Ollama(p) => p.list_models(),
+            AnyProvider::Mock(p) => p.list_models(),
         }
     }
 
@@ -563,6 +651,7 @@ impl Provider for AnyProvider {
         match self {
             AnyProvider::LlamaCpp(p) => p.summarize(text, max_tokens),
             AnyProvider::Ollama(p) => p.summarize(text, max_tokens),
+            AnyProvider::Mock(p) => p.summarize(text, max_tokens),
         }
     }
 }
@@ -570,6 +659,10 @@ impl Provider for AnyProvider {
 pub struct MockProvider {
     turns: Vec<Vec<StreamEvent>>,
     call_index: AtomicUsize,
+    context_window: usize,
+    context_error: Option<String>,
+    summarize_error: Option<String>,
+    summary_response: Option<String>,
 }
 
 impl MockProvider {
@@ -577,7 +670,35 @@ impl MockProvider {
         Self {
             turns,
             call_index: AtomicUsize::new(0),
+            context_window: 4096,
+            context_error: None,
+            summarize_error: None,
+            summary_response: None,
         }
+    }
+
+    pub fn with_context_window(mut self, context_window: usize) -> Self {
+        self.context_window = context_window;
+        self
+    }
+
+    pub fn with_context_error(mut self, error: impl Into<String>) -> Self {
+        self.context_error = Some(error.into());
+        self
+    }
+
+    pub fn with_summarize_error(mut self, error: impl Into<String>) -> Self {
+        self.summarize_error = Some(error.into());
+        self
+    }
+
+    pub fn with_summary_response(mut self, summary: impl Into<String>) -> Self {
+        self.summary_response = Some(summary.into());
+        self
+    }
+
+    pub fn stream_call_count(&self) -> usize {
+        self.call_index.load(Ordering::SeqCst)
     }
 }
 
@@ -607,7 +728,14 @@ impl Provider for MockProvider {
     }
 
     fn context_window(&self) -> BoxFuture<'_, Result<usize>> {
-        Box::pin(async move { Ok(4096) })
+        let context_window = self.context_window;
+        let error = self.context_error.clone();
+        Box::pin(async move {
+            if let Some(error) = error {
+                anyhow::bail!(error);
+            }
+            Ok(context_window)
+        })
     }
 
     fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>>> {
@@ -615,15 +743,32 @@ impl Provider for MockProvider {
     }
 
     fn summarize(&self, _text: String, _max_tokens: u32) -> BoxFuture<'_, Result<String>> {
+        let error = self.summarize_error.clone();
+        let summary = self.summary_response.clone();
         Box::pin(async move {
-            Ok("Mock summary: the conversation covered various topics and tasks.".to_string())
+            if let Some(error) = error {
+                anyhow::bail!(error);
+            }
+            Ok(summary.unwrap_or_else(|| {
+                "Mock summary: the conversation covered various topics and tasks.".to_string()
+            }))
         })
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default, Clone)]
+#[serde(default)]
+struct StreamUsage {
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    total_tokens: u64,
+}
+
+#[derive(Debug, Deserialize, Default)]
 struct StreamChunk {
     choices: Vec<StreamChoice>,
+    #[serde(default)]
+    usage: Option<StreamUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -667,14 +812,27 @@ mod tests {
         let resp: LlamaModelsResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.data.len(), 1);
         assert_eq!(resp.data[0].id, "test.gguf");
-        assert_eq!(resp.data[0].meta.n_ctx_train, 32768);
     }
 
     #[test]
-    fn test_llama_model_meta_default() {
-        let json = r#"{"id": "test.gguf", "meta": {}}"#;
-        let model: LlamaModelInfo = serde_json::from_str(json).unwrap();
-        assert_eq!(model.meta.n_ctx_train, 0);
+    fn test_llama_props_context_parsing() {
+        let json = r#"{"default_generation_settings": {"n_ctx": 8192}}"#;
+        let props: LlamaPropsResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(props.context_size(), Some(8192));
+    }
+
+    #[test]
+    fn test_llama_props_nested_params_context_parsing() {
+        let json = r#"{"default_generation_settings": {"params": {"n_ctx": 17152}}}"#;
+        let props: LlamaPropsResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(props.context_size(), Some(17152));
+    }
+
+    #[test]
+    fn test_llama_props_ignores_theoretical_training_context() {
+        let json = r#"{"n_ctx_train": 65536}"#;
+        let props: LlamaPropsResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(props.context_size(), None);
     }
 
     #[test]
@@ -691,6 +849,27 @@ mod tests {
         let body = build_request_body("test-model", request).unwrap();
         assert_eq!(body["model"], "test-model");
         assert_eq!(body["stream"], true);
+    }
+
+    #[test]
+    fn test_build_request_body_uses_model_tool_content() {
+        let request = ChatRequest {
+            model: "test".into(),
+            system_prompt: "You are a test".into(),
+            messages: vec![ChatMessage::tool_result_with_model_content(
+                "call-1",
+                "full visible output",
+                Some("limited model output"),
+                false,
+            )],
+            tools: vec![],
+            tool_choice: ToolChoice::Auto,
+            max_tokens: None,
+            temperature: None,
+        };
+
+        let body = build_request_body("test-model", request).unwrap();
+        assert_eq!(body["messages"][1]["content"], "limited model output");
     }
 
     #[tokio::test]

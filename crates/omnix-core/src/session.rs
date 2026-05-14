@@ -1,16 +1,10 @@
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use omnix_protocol::{ChatMessage, ContentBlock, Role};
-
-/// Summary of a compaction operation.
-pub struct CompactionResult {
-    pub summary: String,
-    pub removed_count: usize,
-}
 
 /// In-memory conversation session with disk persistence.
 pub struct Session {
@@ -18,15 +12,23 @@ pub struct Session {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub model: String,
+    pub provider: String,
+    pub title: String,
     pub messages: Vec<ChatMessage>,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
 }
 
-/// Lightweight metadata for listing sessions without loading full history.
 pub struct SessionMetadata {
     pub id: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub message_count: usize,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub provider: String,
+    pub model: String,
+    pub title: String,
 }
 
 /// A single line in the JSONL session file.
@@ -39,13 +41,21 @@ enum SessionRecord {
         model: String,
         created_at: DateTime<Utc>,
         updated_at: DateTime<Utc>,
+        #[serde(default)]
+        provider: String,
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        total_input_tokens: u64,
+        #[serde(default)]
+        total_output_tokens: u64,
     },
     Message(ChatMessage),
 }
 
 impl Session {
     /// Create a new blank session.
-    pub fn new(model: impl Into<String>) -> Self {
+    pub fn new(model: impl Into<String>, provider: impl Into<String>) -> Self {
         let now = Utc::now();
         let id = format!("session-{}", now.timestamp_millis());
         Self {
@@ -53,7 +63,11 @@ impl Session {
             created_at: now,
             updated_at: now,
             model: model.into(),
+            provider: provider.into(),
+            title: String::from("New session"),
             messages: Vec::new(),
+            total_input_tokens: 0,
+            total_output_tokens: 0,
         }
     }
 
@@ -65,20 +79,58 @@ impl Session {
 
     /// Estimate total tokens in session (heuristic: chars / 4).
     pub fn estimated_tokens(&self) -> usize {
-        let total_chars: usize = self.messages.iter()
-            .flat_map(|m| &m.content)
-            .map(|block| match block {
-                ContentBlock::Text { text } => text.len(),
-                ContentBlock::ToolUse { id, name, input } => {
-                    id.len() + name.len() + input.to_string().len()
-                }
-                ContentBlock::ToolResult { tool_use_id, content, .. } => {
-                    tool_use_id.len() + content.len()
-                }
-                ContentBlock::Thinking { thinking } => thinking.len(),
-            })
-            .sum();
+        let total_chars: usize = self.messages.iter().map(message_chars).sum();
         (total_chars / 4).max(1)
+    }
+
+    /// Find a split index that keeps approximately `keep_recent_tokens` tokens.
+    /// Always keeps at least the latest user turn and avoids splitting before a tool result.
+    pub fn find_split_index_by_token_budget(&self, keep_recent_tokens: usize) -> usize {
+        if self.messages.len() < 2 {
+            return 0;
+        }
+
+        let Some(latest_user_idx) = self.messages.iter().rposition(|msg| msg.role == Role::User)
+        else {
+            return 0;
+        };
+
+        let mut accumulated_tokens = 0usize;
+        let mut split_idx = 0usize;
+
+        for i in (0..self.messages.len()).rev() {
+            accumulated_tokens += (message_chars(&self.messages[i]) / 4).max(1);
+            if accumulated_tokens > keep_recent_tokens {
+                split_idx = i + 1;
+                break;
+            }
+        }
+
+        if split_idx == 0 {
+            return 0;
+        }
+
+        if split_idx > latest_user_idx {
+            split_idx = latest_user_idx;
+        }
+
+        if split_idx > 0
+            && let Some(msg) = self.messages.get(split_idx)
+            && msg.role == Role::Tool
+        {
+            for j in (0..split_idx).rev() {
+                if self.messages[j].role == Role::Assistant {
+                    split_idx = j;
+                    break;
+                }
+            }
+        }
+
+        if split_idx >= self.messages.len() {
+            0
+        } else {
+            split_idx
+        }
     }
 
     /// Find the index where to split messages for compaction.
@@ -160,9 +212,8 @@ Respond ONLY to the latest user message that appears after this summary.\n\n{}",
     }
 
     /// Persist session to disk as JSONL (atomic write).
-    pub fn save(&self) -> Result<()> {
-        let dir = Self::sessions_dir()?;
-        fs::create_dir_all(&dir)?;
+    pub fn save_to(&self, dir: &Path) -> Result<()> {
+        fs::create_dir_all(dir)?;
 
         let path = dir.join(format!("{}.jsonl", self.id));
         let temp_path = dir.join(format!(".{}.jsonl.tmp", self.id));
@@ -178,6 +229,10 @@ Respond ONLY to the latest user message that appears after this summary.\n\n{}",
             model: self.model.clone(),
             created_at: self.created_at,
             updated_at: self.updated_at,
+            provider: self.provider.clone(),
+            title: self.title.clone(),
+            total_input_tokens: self.total_input_tokens,
+            total_output_tokens: self.total_output_tokens,
         };
         serde_json::to_writer(&mut writer, &meta)?;
         writer.write_all(b"\n")?;
@@ -200,21 +255,19 @@ Respond ONLY to the latest user message that appears after this summary.\n\n{}",
     }
 
     /// Load a session by ID from disk.
-    pub fn load(id: &str) -> Result<Self> {
-        let path = Self::sessions_dir()?.join(format!("{}.jsonl", id));
+    pub fn load_from(id: &str, dir: &Path) -> Result<Self> {
+        let path = dir.join(format!("{}.jsonl", id));
         Self::load_from_path(&path)
     }
 
-    /// List all saved sessions, sorted by most recently updated first.
-    pub fn list() -> Result<Vec<SessionMetadata>> {
-        let dir = Self::sessions_dir()?;
+    pub fn list_from(dir: &Path) -> Result<Vec<SessionMetadata>> {
         if !dir.exists() {
             return Ok(Vec::new());
         }
 
         let mut sessions = Vec::new();
 
-        for entry in fs::read_dir(&dir)? {
+        for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
 
@@ -226,6 +279,11 @@ Respond ONLY to the latest user message that appears after this summary.\n\n{}",
                     created_at: session.created_at,
                     updated_at: session.updated_at,
                     message_count: session.messages.len(),
+                    total_input_tokens: session.total_input_tokens,
+                    total_output_tokens: session.total_output_tokens,
+                    provider: session.provider.clone(),
+                    model: session.model.clone(),
+                    title: session.title.clone(),
                 });
             }
         }
@@ -235,7 +293,7 @@ Respond ONLY to the latest user message that appears after this summary.\n\n{}",
     }
 
     // Helpers
-    fn load_from_path(path: &PathBuf) -> Result<Self> {
+    fn load_from_path(path: &Path) -> Result<Self> {
         let file = File::open(path).with_context(|| format!("Failed to open: {:?}", path))?;
         let reader = BufReader::new(file);
 
@@ -243,7 +301,11 @@ Respond ONLY to the latest user message that appears after this summary.\n\n{}",
         let mut created_at = None;
         let mut updated_at = None;
         let mut model = None;
+        let mut provider = String::new();
+        let mut title = String::new();
         let mut messages = Vec::new();
+        let mut total_input_tokens = 0u64;
+        let mut total_output_tokens = 0u64;
 
         for line in reader.lines() {
             let line = line?;
@@ -260,12 +322,20 @@ Respond ONLY to the latest user message that appears after this summary.\n\n{}",
                     created_at: c,
                     updated_at: u,
                     model: m,
+                    provider: p,
+                    title: t,
+                    total_input_tokens: ti,
+                    total_output_tokens: to,
                     ..
                 } => {
                     id = Some(i);
                     created_at = Some(c);
                     updated_at = Some(u);
                     model = Some(m);
+                    provider = p;
+                    title = t;
+                    total_input_tokens = ti;
+                    total_output_tokens = to;
                 }
                 SessionRecord::Message(msg) => messages.push(msg),
             }
@@ -276,14 +346,38 @@ Respond ONLY to the latest user message that appears after this summary.\n\n{}",
             created_at: created_at.context("Missing session_meta.created_at")?,
             updated_at: updated_at.context("Missing session_meta.updated_at")?,
             model: model.context("Missing session_meta.model")?,
+            provider,
+            title,
             messages,
+            total_input_tokens,
+            total_output_tokens,
         })
     }
 
-    fn sessions_dir() -> Result<PathBuf> {
+    pub fn sessions_dir() -> Result<PathBuf> {
         let home = dirs::home_dir().context("Could not determine home directory")?;
         Ok(home.join(".omnix").join("sessions"))
     }
+}
+
+fn message_chars(message: &ChatMessage) -> usize {
+    message
+        .content
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Text { text } => text.len(),
+            ContentBlock::ToolUse { id, name, input } => {
+                id.len() + name.len() + input.to_string().len()
+            }
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                model_content,
+                ..
+            } => tool_use_id.len() + model_content.as_ref().unwrap_or(content).len(),
+            ContentBlock::Thinking { thinking } => thinking.len(),
+        })
+        .sum()
 }
 
 #[cfg(test)]
@@ -293,7 +387,7 @@ mod tests {
 
     #[test]
     fn test_estimated_tokens_basic() {
-        let mut session = Session::new("test");
+        let mut session = Session::new("test", "test");
         session.push_message(ChatMessage::user("Hello world"));
         // "Hello world" = 11 chars / 4 = ~3 tokens, but max(1) ensures at least 1
         let tokens = session.estimated_tokens();
@@ -302,13 +396,13 @@ mod tests {
 
     #[test]
     fn test_estimated_tokens_empty() {
-        let session = Session::new("test");
+        let session = Session::new("test", "test");
         assert_eq!(session.estimated_tokens(), 1); // max(1)
     }
 
     #[test]
     fn test_find_split_index_basic() {
-        let mut session = Session::new("test");
+        let mut session = Session::new("test", "test");
         // Add 3 turns: user1, assistant1, user2, assistant2, user3, assistant3
         session.push_message(ChatMessage::user("Turn 1"));
         session.push_message(ChatMessage::assistant_text("Response 1"));
@@ -324,7 +418,7 @@ mod tests {
 
     #[test]
     fn test_find_split_index_keep_all() {
-        let mut session = Session::new("test");
+        let mut session = Session::new("test", "test");
         session.push_message(ChatMessage::user("Turn 1"));
         session.push_message(ChatMessage::assistant_text("Response 1"));
 
@@ -335,7 +429,7 @@ mod tests {
 
     #[test]
     fn test_find_split_index_tool_pair_protection() {
-        let mut session = Session::new("test");
+        let mut session = Session::new("test", "test");
         session.push_message(ChatMessage::user("Turn 1"));
         session.push_message(ChatMessage::assistant_text("Response 1"));
         session.push_message(ChatMessage::user("Turn 2"));
@@ -358,8 +452,30 @@ mod tests {
     }
 
     #[test]
+    fn test_find_split_index_by_token_budget_keeps_latest_user() {
+        let mut session = Session::new("test", "test");
+        session.push_message(ChatMessage::user("old"));
+        session.push_message(ChatMessage::assistant_text("old response"));
+        session.push_message(ChatMessage::user("latest request"));
+        session.push_message(ChatMessage::assistant_text("x".repeat(200)));
+
+        let split = session.find_split_index_by_token_budget(1);
+        assert_eq!(split, 2);
+    }
+
+    #[test]
+    fn test_find_split_index_by_token_budget_keeps_all_when_under_budget() {
+        let mut session = Session::new("test", "test");
+        session.push_message(ChatMessage::user("old"));
+        session.push_message(ChatMessage::assistant_text("old response"));
+
+        let split = session.find_split_index_by_token_budget(10_000);
+        assert_eq!(split, 0);
+    }
+
+    #[test]
     fn test_compact_basic() {
-        let mut session = Session::new("test");
+        let mut session = Session::new("test", "test");
         session.push_message(ChatMessage::user("Turn 1"));
         session.push_message(ChatMessage::assistant_text("Response 1"));
         session.push_message(ChatMessage::user("Turn 2"));
@@ -368,7 +484,7 @@ mod tests {
         let removed = session.compact(2, "Summary of turn 1".into());
         assert_eq!(removed, 2);
         assert_eq!(session.messages.len(), 3); // summary + 2 kept messages
-        
+
         // Check summary was inserted
         assert_eq!(session.messages[0].role, Role::User);
         let text = match &session.messages[0].content[0] {
@@ -381,7 +497,7 @@ mod tests {
 
     #[test]
     fn test_compact_no_op() {
-        let mut session = Session::new("test");
+        let mut session = Session::new("test", "test");
         session.push_message(ChatMessage::user("Turn 1"));
         session.push_message(ChatMessage::assistant_text("Response 1"));
 
@@ -393,7 +509,7 @@ mod tests {
 
     #[test]
     fn test_compact_preserves_kept_messages() {
-        let mut session = Session::new("test");
+        let mut session = Session::new("test", "test");
         session.push_message(ChatMessage::user("Turn 1"));
         session.push_message(ChatMessage::assistant_text("Response 1"));
         session.push_message(ChatMessage::user("Turn 2"));
@@ -403,7 +519,7 @@ mod tests {
 
         let removed = session.compact(2, "Summary".into());
         assert_eq!(removed, 2);
-        
+
         // Summary + last 2 turns (4 messages) = 5 total
         assert_eq!(session.messages.len(), 5);
         assert_eq!(session.messages[0].role, Role::User); // summary
@@ -416,35 +532,39 @@ mod tests {
     #[test]
     fn test_save_and_load_roundtrip() {
         use tempfile::TempDir;
-        
+
         let tmp = TempDir::new().unwrap();
-        let original = Session::new("test-model");
-        
+        let original = Session::new("test-model", "test");
+
         // Temporarily override sessions dir
         let path = tmp.path().join(format!("{}.jsonl", original.id));
-        
+
         // Save manually to temp path
         let temp_path = tmp.path().join(format!(".{}.jsonl.tmp", original.id));
         let file = File::create(&temp_path).unwrap();
         let mut writer = BufWriter::new(file);
-        
+
         let meta = SessionRecord::SessionMeta {
             version: 1,
             id: original.id.clone(),
             model: original.model.clone(),
             created_at: original.created_at,
             updated_at: original.updated_at,
+            provider: String::new(),
+            title: String::new(),
+            total_input_tokens: 0,
+            total_output_tokens: 0,
         };
         serde_json::to_writer(&mut writer, &meta).unwrap();
         writer.write_all(b"\n").unwrap();
         writer.flush().unwrap();
         drop(writer);
-        
+
         fs::rename(&temp_path, &path).unwrap();
-        
+
         // Load back
         let loaded = Session::load_from_path(&path).unwrap();
-        
+
         assert_eq!(loaded.id, original.id);
         assert_eq!(loaded.model, original.model);
         assert_eq!(loaded.messages.len(), original.messages.len());
@@ -453,28 +573,32 @@ mod tests {
     #[test]
     fn test_save_and_load_with_messages() {
         use tempfile::TempDir;
-        
+
         let tmp = TempDir::new().unwrap();
-        let mut session = Session::new("test-model");
+        let mut session = Session::new("test-model", "test");
         session.push_message(ChatMessage::user("Hello"));
         session.push_message(ChatMessage::assistant_text("Hi there"));
-        
+
         let path = tmp.path().join(format!("{}.jsonl", session.id));
         let temp_path = tmp.path().join(format!(".{}.jsonl.tmp", session.id));
-        
+
         let file = File::create(&temp_path).unwrap();
         let mut writer = BufWriter::new(file);
-        
+
         let meta = SessionRecord::SessionMeta {
             version: 1,
             id: session.id.clone(),
             model: session.model.clone(),
             created_at: session.created_at,
             updated_at: session.updated_at,
+            provider: String::new(),
+            title: String::new(),
+            total_input_tokens: 0,
+            total_output_tokens: 0,
         };
         serde_json::to_writer(&mut writer, &meta).unwrap();
         writer.write_all(b"\n").unwrap();
-        
+
         for msg in &session.messages {
             let record = SessionRecord::Message(msg.clone());
             serde_json::to_writer(&mut writer, &record).unwrap();
@@ -482,11 +606,11 @@ mod tests {
         }
         writer.flush().unwrap();
         drop(writer);
-        
+
         fs::rename(&temp_path, &path).unwrap();
-        
+
         let loaded = Session::load_from_path(&path).unwrap();
-        
+
         assert_eq!(loaded.messages.len(), 2);
         assert_eq!(loaded.messages[0].role, Role::User);
         assert_eq!(loaded.messages[1].role, Role::Assistant);

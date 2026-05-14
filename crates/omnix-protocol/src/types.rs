@@ -51,3 +51,15 @@ impl ToolResultContent {
         }
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionListEntry {
+    pub id: String,
+    pub updated_at: String,
+    pub message_count: usize,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub provider: String,
+    pub model: String,
+    pub title: String,
+}

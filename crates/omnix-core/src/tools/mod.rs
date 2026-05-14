@@ -7,7 +7,7 @@ pub mod grep;
 pub mod list_dir;
 pub mod memory;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -59,14 +59,19 @@ impl Default for ToolContext {
 #[derive(Debug, Clone)]
 pub struct ToolOutput {
     pub content: String,
+    pub model_content: Option<String>,
     pub is_error: bool,
     pub metadata: HashMap<String, serde_json::Value>,
 }
+
+const MODEL_CONTENT_MAX_LINES: usize = 2_000;
+const MODEL_CONTENT_MAX_BYTES: usize = 50 * 1024;
 
 impl ToolOutput {
     pub fn ok(content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
+            model_content: None,
             is_error: false,
             metadata: HashMap::new(),
         }
@@ -75,6 +80,7 @@ impl ToolOutput {
     pub fn err(content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
+            model_content: None,
             is_error: true,
             metadata: HashMap::new(),
         }
@@ -84,6 +90,58 @@ impl ToolOutput {
         self.metadata.insert(key.into(), value);
         self
     }
+
+    pub fn with_limited_model_content(mut self) -> Self {
+        self.model_content = truncate_for_model(&self.content);
+        self
+    }
+}
+
+fn truncate_for_model(content: &str) -> Option<String> {
+    let total_lines = content.lines().count();
+    let total_bytes = content.len();
+
+    if total_lines <= MODEL_CONTENT_MAX_LINES && total_bytes <= MODEL_CONTENT_MAX_BYTES {
+        return None;
+    }
+
+    let mut truncated = String::new();
+    let mut kept_lines = 0;
+
+    for line in content.lines() {
+        if kept_lines >= MODEL_CONTENT_MAX_LINES {
+            break;
+        }
+
+        let separator_len = usize::from(!truncated.is_empty());
+        if truncated.len() + separator_len + line.len() > MODEL_CONTENT_MAX_BYTES {
+            break;
+        }
+
+        if !truncated.is_empty() {
+            truncated.push('\n');
+        }
+        truncated.push_str(line);
+        kept_lines += 1;
+    }
+
+    if truncated.is_empty() && !content.is_empty() {
+        let end = content
+            .char_indices()
+            .map(|(idx, _)| idx)
+            .take_while(|idx| *idx <= MODEL_CONTENT_MAX_BYTES)
+            .last()
+            .unwrap_or(0);
+        truncated.push_str(&content[..end]);
+    }
+
+    let shown_bytes = truncated.len();
+    let shown_lines = truncated.lines().count();
+    truncated.push_str(&format!(
+        "\n\n... (truncated for model context: {shown_lines} of {total_lines} lines, {shown_bytes} of {total_bytes} bytes shown; full output remains visible in the tool card)"
+    ));
+
+    Some(truncated)
 }
 
 #[derive(Error, Debug, Clone)]
@@ -106,6 +164,7 @@ pub enum ToolError {
 
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
+    disabled: HashSet<String>,
 }
 
 impl Default for ToolRegistry {
@@ -118,6 +177,7 @@ impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
+            disabled: HashSet::new(),
         }
     }
 
@@ -140,6 +200,7 @@ impl ToolRegistry {
     pub fn tool_definitions(&self) -> Vec<ToolDefinition> {
         self.tools
             .values()
+            .filter(|t| !self.disabled.contains(t.name()))
             .map(|tool| ToolDefinition {
                 name: tool.name().to_string(),
                 description: tool.description().to_string(),
@@ -149,12 +210,23 @@ impl ToolRegistry {
             .collect()
     }
 
+    pub fn enable(&mut self, name: &str) {
+        self.disabled.remove(name);
+    }
+
+    pub fn disable(&mut self, name: &str) {
+        self.disabled.insert(name.to_string());
+    }
+
     pub async fn execute(
         &self,
         name: &str,
         input: serde_json::Value,
         ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
+        if self.disabled.contains(name) {
+            return Err(ToolError::Other(format!("Tool '{}' is disabled", name)));
+        }
         let tool = self
             .tools
             .get(name)
@@ -292,6 +364,24 @@ mod tests {
     fn tool_output_with_metadata() {
         let out = ToolOutput::ok("content").with_metadata("exit_code", json!(0));
         assert_eq!(out.metadata.get("exit_code").unwrap(), &json!(0));
+    }
+
+    #[test]
+    fn tool_output_keeps_short_model_content_inline() {
+        let out = ToolOutput::ok("short output").with_limited_model_content();
+        assert_eq!(out.content, "short output");
+        assert!(out.model_content.is_none());
+    }
+
+    #[test]
+    fn tool_output_limits_long_model_content() {
+        let content = "x".repeat(MODEL_CONTENT_MAX_BYTES * 2);
+        let out = ToolOutput::ok(content.clone()).with_limited_model_content();
+
+        assert_eq!(out.content, content);
+        let model_content = out.model_content.expect("long output should be limited");
+        assert!(model_content.contains("truncated for model context"));
+        assert!(model_content.len() < out.content.len());
     }
 
     #[test]

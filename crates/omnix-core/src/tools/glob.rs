@@ -87,8 +87,10 @@ mod tests {
         fs::write(dir.path().join("c.txt"), "").unwrap();
 
         let tool = Glob;
-        let mut ctx = ToolContext::default();
-        ctx.working_directory = dir.path().to_path_buf();
+        let ctx = ToolContext {
+            working_directory: dir.path().to_path_buf(),
+            ..Default::default()
+        };
 
         let out = tool
             .execute(json!({"pattern": "*.rs"}), &ctx)
@@ -106,8 +108,10 @@ mod tests {
     async fn glob_no_matches() {
         let dir = tempdir().unwrap();
         let tool = Glob;
-        let mut ctx = ToolContext::default();
-        ctx.working_directory = dir.path().to_path_buf();
+        let ctx = ToolContext {
+            working_directory: dir.path().to_path_buf(),
+            ..Default::default()
+        };
 
         let out = tool
             .execute(json!({"pattern": "*.nonexistent"}), &ctx)
