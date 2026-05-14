@@ -10,9 +10,17 @@ type ContextUpdatedEvent = Extract<CoreEvent, { event: "context_updated" }>;
 export function routeSessionCompacted(event: SessionCompactedEvent) {
   const activeId = useSessionStore.getState().activeSessionId ?? "";
   const compactedMessages = convertChatMessages(event.messages);
+  const notice = {
+    removedCount: event.removed_count,
+    tokensBefore: event.tokens_before,
+    inputBudget: event.input_budget,
+    firstKeptIndex: event.first_kept_index,
+    createdAt: new Date().toISOString(),
+  };
 
   if (event.session_id === activeId) {
     useChatStore.getState().setMessages(compactedMessages);
+    useChatStore.getState().addCompactionNotice(notice);
     return;
   }
 
@@ -22,6 +30,7 @@ export function routeSessionCompacted(event: SessionCompactedEvent) {
   useTabStore.getState().saveSnapshot(event.session_id, {
     ...snap,
     messages: compactedMessages,
+    compactionNotices: [...(snap.compactionNotices ?? []), notice].slice(-5),
   });
 }
 

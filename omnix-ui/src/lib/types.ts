@@ -12,6 +12,14 @@ export interface DisplayMessage {
   time: string;
 }
 
+export interface CompactionNotice {
+  removedCount: number;
+  tokensBefore: number;
+  inputBudget: number;
+  firstKeptIndex: number;
+  createdAt: string;
+}
+
 export interface ToolCallDisplay {
   callId: string;
   name: string;

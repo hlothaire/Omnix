@@ -4,8 +4,9 @@ interface TabState {
   tabs: { id: string; title: string }[];
   activeIndex: number;
   snapshots: Record<string, {
-    messages: import("@/lib/types").DisplayMessage[];
-    inputText: string;
+      messages: import("@/lib/types").DisplayMessage[];
+      compactionNotices: import("@/lib/types").CompactionNotice[];
+      inputText: string;
     isStreaming: boolean;
     totalInputTokens: number;
     totalOutputTokens: number;

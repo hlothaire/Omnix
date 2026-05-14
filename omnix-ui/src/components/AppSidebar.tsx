@@ -66,6 +66,7 @@ export function AppSidebar() {
     if (currentTab) {
       saveSnapshot(currentTab.id, {
         messages: chat.messages,
+        compactionNotices: chat.compactionNotices,
         inputText: chat.inputText,
         isStreaming: chat.isStreaming,
         totalInputTokens: chat.totalInputTokens,
@@ -81,6 +82,7 @@ export function AppSidebar() {
     const snap = loadSnapshot(id);
     if (snap) {
       chat.setMessages(snap.messages);
+      chat.setCompactionNotices(snap.compactionNotices ?? []);
       chat.setInputText(snap.inputText);
       chat.setStreaming(
         snap.isStreaming && useChatStore.getState().isStreamingForSession(id)
@@ -114,6 +116,7 @@ export function AppSidebar() {
         const snap = loadSnapshot(nextTab.id);
         if (snap) {
           chat.setMessages(snap.messages);
+          chat.setCompactionNotices(snap.compactionNotices ?? []);
           chat.setInputText(snap.inputText);
           chat.setStreaming(
             snap.isStreaming && useChatStore.getState().isStreamingForSession(nextTab.id)

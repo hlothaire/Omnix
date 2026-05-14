@@ -23,6 +23,7 @@ export function TabBar() {
     if (currentTab) {
       saveSnapshot(currentTab.id, {
         messages: chat.messages,
+        compactionNotices: chat.compactionNotices,
         inputText: chat.inputText,
         isStreaming: chat.isStreaming,
         totalInputTokens: chat.totalInputTokens,
@@ -41,6 +42,7 @@ export function TabBar() {
     const snap = loadSnapshot(tabs[index].id);
     if (snap) {
       chat.setMessages(snap.messages);
+      chat.setCompactionNotices(snap.compactionNotices ?? []);
       chat.setInputText(snap.inputText);
       chat.setStreaming(
         snap.isStreaming && useChatStore.getState().isStreamingForSession(tabs[index].id)
@@ -64,6 +66,7 @@ export function TabBar() {
         const snap = loadSnapshot(nextTab.id);
         if (snap) {
           chat.setMessages(snap.messages);
+          chat.setCompactionNotices(snap.compactionNotices ?? []);
           chat.setInputText(snap.inputText);
           chat.setStreaming(
             snap.isStreaming && useChatStore.getState().isStreamingForSession(nextTab.id)

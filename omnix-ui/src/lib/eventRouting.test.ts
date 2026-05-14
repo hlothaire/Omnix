@@ -26,6 +26,7 @@ function chatMessage(text: string): ChatMessage {
 function saveSnapshot(sessionId: string, messages: DisplayMessage[] = []) {
   useTabStore.getState().saveSnapshot(sessionId, {
     messages,
+    compactionNotices: [],
     inputText: "",
     isStreaming: false,
     totalInputTokens: 0,
@@ -102,7 +103,15 @@ describe("event routing", () => {
 
     expect(useChatStore.getState().messages).toHaveLength(1);
     expect(useChatStore.getState().messages[0].text).toBe("compacted active");
+    expect(useChatStore.getState().compactionNotices).toHaveLength(1);
+    expect(useChatStore.getState().compactionNotices[0]).toMatchObject({
+      removedCount: 2,
+      tokensBefore: 100,
+      inputBudget: 50,
+      firstKeptIndex: 1,
+    });
     expect(useTabStore.getState().snapshots.background.messages[0].text).toBe("old background");
+    expect(useTabStore.getState().snapshots.background.compactionNotices).toHaveLength(0);
   });
 
   it("routes background compaction messages to the matching snapshot only", () => {
@@ -122,9 +131,17 @@ describe("event routing", () => {
     });
 
     expect(useChatStore.getState().messages[0].text).toBe("old active");
+    expect(useChatStore.getState().compactionNotices).toHaveLength(0);
     expect(useTabStore.getState().snapshots.background.messages).toHaveLength(1);
     expect(useTabStore.getState().snapshots.background.messages[0].text).toBe(
       "compacted background",
     );
+    expect(useTabStore.getState().snapshots.background.compactionNotices).toHaveLength(1);
+    expect(useTabStore.getState().snapshots.background.compactionNotices[0]).toMatchObject({
+      removedCount: 2,
+      tokensBefore: 100,
+      inputBudget: 50,
+      firstKeptIndex: 1,
+    });
   });
 });

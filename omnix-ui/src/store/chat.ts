@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { DisplayMessage } from "@/lib/types";
+import { CompactionNotice, DisplayMessage } from "@/lib/types";
 import { sendPrompt, renameSession } from "@/lib/commands";
 import { useSessionStore } from "./sessions";
 import { useTabStore } from "./tabs";
@@ -7,6 +7,7 @@ import { useSettingsStore } from "./settings";
 
 interface ChatState {
   messages: DisplayMessage[];
+  compactionNotices: CompactionNotice[];
   inputText: string;
   isStreaming: boolean;
   streamingSessionId: string | null;
@@ -32,6 +33,8 @@ interface ChatState {
   addSystemMessage: (msg: string) => void;
   addSystemNote: (msg: string) => void;
   setMessages: (msgs: DisplayMessage[]) => void;
+  setCompactionNotices: (notices: CompactionNotice[]) => void;
+  addCompactionNotice: (notice: CompactionNotice) => void;
   setTokens: (input: number, output: number) => void;
   setContextUsage: (used: number, max: number | null, percent: number | null) => void;
   toggleToolCard: (id: string) => void;
@@ -42,6 +45,7 @@ interface ChatState {
 
 export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
+  compactionNotices: [],
   inputText: "",
   isStreaming: false,
   streamingSessionId: null,
@@ -155,6 +159,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   })),
 
   setMessages: (msgs) => set({ messages: msgs }),
+  setCompactionNotices: (notices) => set({ compactionNotices: notices }),
+  addCompactionNotice: (notice) => set((s) => ({
+    compactionNotices: [...s.compactionNotices, notice].slice(-5),
+  })),
   toggleToolCard: (id) => set((s) => ({
     expandedTools: { ...s.expandedTools, [id]: !s.expandedTools[id] },
   })),
@@ -162,7 +170,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     expandedThinking: { ...s.expandedThinking, [idx]: !s.expandedThinking[idx] },
   })),
   clear: () => set({
-    messages: [], inputText: "", isStreaming: false, streamingSessionId: null,
+    messages: [], compactionNotices: [], inputText: "", isStreaming: false, streamingSessionId: null,
     totalInputTokens: 0, totalOutputTokens: 0,
     contextUsedTokens: 0, contextMaxTokens: null, contextPercent: null,
   }),
