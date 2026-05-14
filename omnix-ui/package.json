@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test": "vitest run",
     "preview": "vite preview",
     "tauri": "tauri"
   },
@@ -35,6 +36,7 @@
     "@vitejs/plugin-react": "^4",
     "tailwindcss": "^4",
     "typescript": "^5",
-    "vite": "^5"
+    "vite": "^5",
+    "vitest": "^4.1.6"
   }
 }

@@ -8,6 +8,7 @@ import { useApprovalStore } from "@/store/approvals";
 import { useSettingsStore } from "@/store/settings";
 import { useTabStore } from "@/store/tabs";
 import { listSessions } from "@/lib/commands";
+import { routeContextUpdated, routeSessionCompacted } from "@/lib/eventRouting";
 
 export function useCoreEvents() {
   const chat = useChatStore();
@@ -191,21 +192,7 @@ export function useCoreEvents() {
                 })));
                 break;
               case "session_compacted":
-                {
-                  const activeId = useSessionStore.getState().activeSessionId ?? "";
-                  const compactedMessages = convertChatMessages(event.messages);
-                  if (event.session_id === activeId) {
-                    chat.setMessages(compactedMessages);
-                  } else {
-                    const snap = useTabStore.getState().snapshots[event.session_id];
-                    if (snap) {
-                      useTabStore.getState().saveSnapshot(event.session_id, {
-                        ...snap,
-                        messages: compactedMessages,
-                      });
-                    }
-                  }
-                }
+                routeSessionCompacted(event);
                 break;
               case "api_error":
                 chat.addErrorMessage(event.message);
@@ -217,20 +204,7 @@ export function useCoreEvents() {
                 chat.addErrorMessage(`Max iterations reached (${event.limit})`);
                 break;
               case "context_updated": {
-                const activeId = useSessionStore.getState().activeSessionId ?? "";
-                if (event.session_id === activeId) {
-                  chat.setContextUsage(event.used_tokens, event.max_tokens, event.percent);
-                } else {
-                  const snap = useTabStore.getState().snapshots[event.session_id];
-                  if (snap) {
-                    useTabStore.getState().saveSnapshot(event.session_id, {
-                      ...snap,
-                      contextUsedTokens: event.used_tokens,
-                      contextMaxTokens: event.max_tokens,
-                      contextPercent: event.percent,
-                    });
-                  }
-                }
+                routeContextUpdated(event);
                 break;
               }
               case "model_changed":
