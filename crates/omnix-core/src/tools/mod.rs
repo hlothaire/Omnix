@@ -162,6 +162,7 @@ pub enum ToolError {
     Other(String),
 }
 
+#[derive(Clone)]
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
     disabled: HashSet<String>,

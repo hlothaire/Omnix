@@ -11,6 +11,7 @@ interface ChatState {
   inputText: string;
   isStreaming: boolean;
   streamingSessionId: string | null;
+  streamingSessionIds: Record<string, boolean>;
   totalInputTokens: number;
   totalOutputTokens: number;
   contextUsedTokens: number;
@@ -27,6 +28,7 @@ interface ChatState {
   toolError: (id: string, message: string) => void;
   setStreaming: (v: boolean) => void;
   setStreamingSession: (id: string | null) => void;
+  setSessionStreaming: (id: string, isStreaming: boolean) => void;
   isStreamingForSession: (id: string) => boolean;
   addTokens: (input: number, output: number) => void;
   addErrorMessage: (msg: string) => void;
@@ -49,6 +51,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   inputText: "",
   isStreaming: false,
   streamingSessionId: null,
+  streamingSessionIds: {},
   totalInputTokens: 0,
   totalOutputTokens: 0,
   contextUsedTokens: 0,
@@ -123,8 +126,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
   }),
 
   setStreaming: (v) => set({ isStreaming: v }),
-  setStreamingSession: (id) => set({ streamingSessionId: id, isStreaming: id !== null }),
-  isStreamingForSession: (id) => get().streamingSessionId === id,
+  setStreamingSession: (id) => set((s) => ({
+    streamingSessionId: id,
+    isStreaming: id !== null,
+    streamingSessionIds: id ? { ...s.streamingSessionIds, [id]: true } : s.streamingSessionIds,
+  })),
+  setSessionStreaming: (id, isStreaming) => set((s) => {
+    const streamingSessionIds = { ...s.streamingSessionIds };
+    if (isStreaming) streamingSessionIds[id] = true;
+    else delete streamingSessionIds[id];
+    return {
+      streamingSessionIds,
+      streamingSessionId: isStreaming ? id : s.streamingSessionId === id ? null : s.streamingSessionId,
+      isStreaming: isStreaming || (s.streamingSessionId !== id && s.isStreaming),
+    };
+  }),
+  isStreamingForSession: (id) => Boolean(get().streamingSessionIds[id]),
   addTokens: (input, output) => set((s) => ({
     totalInputTokens: s.totalInputTokens + input,
     totalOutputTokens: s.totalOutputTokens + output,
@@ -170,7 +187,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     expandedThinking: { ...s.expandedThinking, [idx]: !s.expandedThinking[idx] },
   })),
   clear: () => set({
-    messages: [], compactionNotices: [], inputText: "", isStreaming: false, streamingSessionId: null,
+    messages: [], compactionNotices: [], inputText: "", isStreaming: false, streamingSessionId: null, streamingSessionIds: {},
     totalInputTokens: 0, totalOutputTokens: 0,
     contextUsedTokens: 0, contextMaxTokens: null, contextPercent: null,
   }),
@@ -204,7 +221,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       inputText: "",
       isStreaming: true,
       streamingSessionId: maybeId,
+      streamingSessionIds: maybeId ? { ...get().streamingSessionIds, [maybeId]: true } : get().streamingSessionIds,
     });
-    sendPrompt(inputText);
+    sendPrompt(inputText, maybeId);
   },
 }));

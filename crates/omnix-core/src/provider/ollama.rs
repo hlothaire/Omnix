@@ -11,6 +11,7 @@ use super::{
     ChatRequest, Provider, StreamEvent, build_request_body, parse_sse_stream, retry_request,
 };
 
+#[derive(Clone)]
 pub struct OllamaProvider {
     client: Client,
     base_url: String,

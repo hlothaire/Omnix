@@ -35,8 +35,10 @@ impl AppState {
 }
 
 #[tauri::command]
-fn send_prompt(state: State<AppState>, text: String) {
-    let _ = state.cmd_tx.send(CoreCommand::SendPrompt { text });
+fn send_prompt(state: State<AppState>, text: String, session_id: Option<String>) {
+    let _ = state
+        .cmd_tx
+        .send(CoreCommand::SendPrompt { text, session_id });
 }
 
 #[tauri::command]
@@ -100,8 +102,8 @@ fn set_permission_mode(state: State<AppState>, mode: String) {
 }
 
 #[tauri::command]
-fn cancel_turn(state: State<AppState>) {
-    let _ = state.cmd_tx.send(CoreCommand::CancelTurn);
+fn cancel_turn(state: State<AppState>, session_id: Option<String>) {
+    let _ = state.cmd_tx.send(CoreCommand::CancelTurn { session_id });
 }
 
 #[tauri::command]

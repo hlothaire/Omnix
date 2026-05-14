@@ -91,7 +91,10 @@ export function TabBar() {
               ? "bg-background text-foreground"
               : "text-muted-foreground hover:text-foreground hover:bg-accent/40"
           )}
-        >
+          >
+          {chat.isStreamingForSession(tab.id) && (
+            <span className="size-1.5 rounded-full bg-primary animate-pulse-soft" />
+          )}
           <span className="max-w-[160px] truncate">{tab.title}</span>
           <div
             className="flex items-center justify-center rounded-full opacity-0 group-hover:opacity-100 transition-opacity"

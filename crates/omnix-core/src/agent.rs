@@ -88,6 +88,13 @@ pub struct AgentCore {
     cancel_tx: mpsc::UnboundedSender<()>,
 }
 
+struct RunningTurn {
+    cmd_tx: mpsc::UnboundedSender<CoreCommand>,
+    cancel_tx: mpsc::UnboundedSender<()>,
+    provider: String,
+    model: String,
+}
+
 impl AgentCore {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -264,16 +271,151 @@ impl AgentCore {
     }
 
     pub async fn run(&mut self, mut command_rx: mpsc::UnboundedReceiver<CoreCommand>) {
+        let (turn_finished_tx, mut turn_finished_rx) = mpsc::unbounded_channel::<Session>();
+        let mut running_turns: HashMap<String, RunningTurn> = HashMap::new();
+
         while let Some(cmd) = command_rx.recv().await {
+            while let Ok(session) = turn_finished_rx.try_recv() {
+                running_turns.remove(&session.id);
+                if self.session.id == session.id {
+                    self.session = session;
+                }
+            }
+
             if self.should_shutdown {
                 break;
             }
             match cmd {
-                CoreCommand::SendPrompt { text } => {
-                    self.execute_prompt(text, &mut command_rx).await;
-                    if self.should_shutdown {
-                        break;
+                CoreCommand::SendPrompt { text, session_id } => {
+                    let target_session_id = session_id.unwrap_or_else(|| self.session.id.clone());
+                    if running_turns.contains_key(&target_session_id) {
+                        let _ = self.event_tx.send(CoreEvent::ApiError {
+                            session_id: Some(target_session_id),
+                            message: "This session is already running a turn.".to_string(),
+                            retryable: false,
+                        });
+                        continue;
                     }
+
+                    let session = if target_session_id == self.session.id {
+                        self.session.clone()
+                    } else {
+                        match Session::load_from(&target_session_id, &self.sessions_dir) {
+                            Ok(session) => session,
+                            Err(e) => {
+                                let _ = self.event_tx.send(CoreEvent::ApiError {
+                                    session_id: Some(target_session_id),
+                                    message: format!("Failed to load session for prompt: {}", e),
+                                    retryable: false,
+                                });
+                                continue;
+                            }
+                        }
+                    };
+
+                    if let Some(other) = running_turns.values().next()
+                        && (other.provider != session.provider || other.model != session.model)
+                    {
+                        let _ = self.event_tx.send(CoreEvent::ApiError {
+                            session_id: Some(session.id.clone()),
+                            message: "Another session is already streaming with a different provider or model. Wait for it to finish or use the same provider/model.".to_string(),
+                            retryable: false,
+                        });
+                        continue;
+                    }
+
+                    if session.provider.trim().is_empty() || session.model.trim().is_empty() {
+                        let _ = self.event_tx.send(CoreEvent::ApiError {
+                            session_id: Some(session.id.clone()),
+                            message: "Choose a provider and model before sending a prompt."
+                                .to_string(),
+                            retryable: false,
+                        });
+                        continue;
+                    }
+
+                    let (host, provider) = if session.id == self.session.id {
+                        match self.provider.clone() {
+                            Some(provider) => (self.provider_host.clone(), provider),
+                            None => match Self::build_provider(
+                                &session.provider,
+                                &self.provider_host,
+                                &session.model,
+                            ) {
+                                Ok(provider) => provider,
+                                Err(e) => {
+                                    let _ = self.event_tx.send(CoreEvent::ApiError {
+                                        session_id: Some(session.id.clone()),
+                                        message: format!(
+                                            "No provider is ready for this session: {}",
+                                            e
+                                        ),
+                                        retryable: false,
+                                    });
+                                    continue;
+                                }
+                            },
+                        }
+                    } else {
+                        match Self::build_provider(
+                            &session.provider,
+                            &self.provider_host,
+                            &session.model,
+                        ) {
+                            Ok(provider) => provider,
+                            Err(e) => {
+                                let _ = self.event_tx.send(CoreEvent::ApiError {
+                                    session_id: Some(session.id.clone()),
+                                    message: format!(
+                                        "No provider is ready for this session: {}",
+                                        e
+                                    ),
+                                    retryable: false,
+                                });
+                                continue;
+                            }
+                        }
+                    };
+
+                    let (child_tx, child_rx) = mpsc::unbounded_channel();
+                    let mut child = AgentCore::new(
+                        Some(provider),
+                        session.model.clone(),
+                        session.provider.clone(),
+                        host,
+                        self.tools.clone(),
+                        self.permissions.clone(),
+                        SystemPromptBuilder::new(self.permissions.mode()),
+                        self.memory_store_path.clone(),
+                        self.sessions_dir.clone(),
+                        self.event_tx.clone(),
+                    )
+                    .with_compaction(crate::config::CompactionConfig {
+                        requested_output_tokens: self.requested_max_output_tokens,
+                        min_safety_margin_tokens: self.min_safety_margin_tokens,
+                        safety_margin_percent: self.safety_margin_percent,
+                        max_keep_recent_tokens: self.max_keep_recent_tokens,
+                    });
+                    child.telemetry = self.telemetry.clone();
+                    child.session = session;
+                    let cancel_tx = child.cancel_tx.clone();
+
+                    running_turns.insert(
+                        child.session.id.clone(),
+                        RunningTurn {
+                            cmd_tx: child_tx,
+                            cancel_tx,
+                            provider: child.session.provider.clone(),
+                            model: child.session.model.clone(),
+                        },
+                    );
+
+                    let tx = turn_finished_tx.clone();
+                    tokio::spawn(async move {
+                        let mut child_rx = child_rx;
+                        child.execute_prompt(text, &mut child_rx).await;
+                        let _ = tx.send(child.session);
+                    });
                 }
                 CoreCommand::NewSession => {
                     if !self.session.messages.is_empty() {
@@ -297,6 +439,7 @@ impl AgentCore {
                     }
                     Err(e) => {
                         let _ = self.event_tx.send(CoreEvent::ApiError {
+                            session_id: Some(self.session.id.clone()),
                             message: e.to_string(),
                             retryable: false,
                         });
@@ -314,6 +457,7 @@ impl AgentCore {
                             self.session = session;
                             if let Err(e) = self.rebuild_provider_for_session() {
                                 let _ = self.event_tx.send(CoreEvent::ApiError {
+                                    session_id: Some(self.session.id.clone()),
                                     message: format!("Failed to restore session provider: {}", e),
                                     retryable: false,
                                 });
@@ -331,6 +475,7 @@ impl AgentCore {
                         }
                         Err(e) => {
                             let _ = self.event_tx.send(CoreEvent::ApiError {
+                                session_id: None,
                                 message: e.to_string(),
                                 retryable: false,
                             });
@@ -356,6 +501,7 @@ impl AgentCore {
                     }
                     Err(e) => {
                         let _ = self.event_tx.send(CoreEvent::ApiError {
+                            session_id: None,
                             message: format!("Failed to list sessions: {}", e),
                             retryable: false,
                         });
@@ -369,6 +515,7 @@ impl AgentCore {
                         }
                         Err(e) => {
                             let _ = self.event_tx.send(CoreEvent::ApiError {
+                                session_id: None,
                                 message: format!("Failed to delete session {}: {}", id, e),
                                 retryable: false,
                             });
@@ -387,6 +534,7 @@ impl AgentCore {
                             }
                             Err(e) => {
                                 let _ = self.event_tx.send(CoreEvent::ApiError {
+                                    session_id: Some(id.clone()),
                                     message: format!("Rename failed: {}", e),
                                     retryable: false,
                                 });
@@ -398,8 +546,17 @@ impl AgentCore {
                     self.permissions.set_mode(mode);
                 }
                 CoreCommand::SetModel { model } => {
+                    if !running_turns.is_empty() {
+                        let _ = self.event_tx.send(CoreEvent::ApiError {
+                            session_id: Some(self.session.id.clone()),
+                            message: "Model is locked while any session is streaming.".to_string(),
+                            retryable: false,
+                        });
+                        continue;
+                    }
                     if !self.session.messages.is_empty() {
                         let _ = self.event_tx.send(CoreEvent::ApiError {
+                            session_id: Some(self.session.id.clone()),
                             message: "Model is locked for sessions that already have messages. Create a new session to use a different model.".to_string(),
                             retryable: false,
                         });
@@ -409,6 +566,7 @@ impl AgentCore {
                     if !self.session.provider.trim().is_empty() {
                         if let Err(e) = self.rebuild_provider_for_session() {
                             let _ = self.event_tx.send(CoreEvent::ApiError {
+                                session_id: Some(self.session.id.clone()),
                                 message: format!("Failed to switch model: {}", e),
                                 retryable: false,
                             });
@@ -417,8 +575,18 @@ impl AgentCore {
                     let _ = self.event_tx.send(CoreEvent::ModelChanged { model });
                 }
                 CoreCommand::SetProvider { provider } => {
+                    if !running_turns.is_empty() {
+                        let _ = self.event_tx.send(CoreEvent::ApiError {
+                            session_id: Some(self.session.id.clone()),
+                            message: "Provider is locked while any session is streaming."
+                                .to_string(),
+                            retryable: false,
+                        });
+                        continue;
+                    }
                     if !self.session.messages.is_empty() {
                         let _ = self.event_tx.send(CoreEvent::ApiError {
+                            session_id: Some(self.session.id.clone()),
                             message: "Provider is locked for sessions that already have messages. Create a new session to use a different provider.".to_string(),
                             retryable: false,
                         });
@@ -434,6 +602,7 @@ impl AgentCore {
                         }
                         Err(e) => {
                             let _ = self.event_tx.send(CoreEvent::ApiError {
+                                session_id: Some(self.session.id.clone()),
                                 message: format!("Failed to switch provider: {}", e),
                                 retryable: false,
                             });
@@ -482,17 +651,48 @@ impl AgentCore {
                         }
                         Err(e) => {
                             let _ = self.event_tx.send(CoreEvent::ApiError {
+                                session_id: Some(self.session.id.clone()),
                                 message: format!("Memory action failed: {}", e),
                                 retryable: false,
                             });
                         }
                     }
                 }
-                CoreCommand::CancelTurn => {
-                    let _ = self.cancel_tx.send(());
+                CoreCommand::CancelTurn { session_id } => {
+                    if let Some(session_id) = session_id {
+                        if session_id == self.session.id {
+                            let _ = self.cancel_tx.send(());
+                        }
+                        if let Some(running) = running_turns.get(&session_id) {
+                            let _ = running.cancel_tx.send(());
+                        }
+                    } else {
+                        let _ = self.cancel_tx.send(());
+                        for running in running_turns.values() {
+                            let _ = running.cancel_tx.send(());
+                        }
+                    }
                 }
-                CoreCommand::Shutdown => break,
-                _ => {}
+                CoreCommand::Shutdown => {
+                    for running in running_turns.values() {
+                        let _ = running.cmd_tx.send(CoreCommand::Shutdown);
+                    }
+                    while !running_turns.is_empty() {
+                        let Some(session) = turn_finished_rx.recv().await else {
+                            break;
+                        };
+                        running_turns.remove(&session.id);
+                        if self.session.id == session.id {
+                            self.session = session;
+                        }
+                    }
+                    break;
+                }
+                CoreCommand::RespondToApproval { .. } => {
+                    for running in running_turns.values() {
+                        let _ = running.cmd_tx.send(cmd.clone());
+                    }
+                }
             }
         }
     }
@@ -510,6 +710,7 @@ impl AgentCore {
         if self.provider.is_none() {
             if let Err(e) = self.rebuild_provider_for_session() {
                 let _ = self.event_tx.send(CoreEvent::ApiError {
+                    session_id: Some(session_id.clone()),
                     message: format!("No provider is ready for this session: {}", e),
                     retryable: false,
                 });
@@ -519,11 +720,30 @@ impl AgentCore {
 
         if self.provider.is_none() {
             let _ = self.event_tx.send(CoreEvent::ApiError {
+                session_id: Some(session_id.clone()),
                 message: "Choose a provider before sending a prompt.".to_string(),
                 retryable: false,
             });
             return;
         }
+
+        let mut pending_context_window = match self.provider.as_ref() {
+            Some(provider) => match provider.context_window().await {
+                Ok(context_window) => Some(context_window),
+                Err(e) => {
+                    let _ = self.event_tx.send(CoreEvent::ApiError {
+                        session_id: Some(session_id.clone()),
+                        message: format!(
+                            "Cannot determine provider context window: {}. Omnix will not send this prompt because context compaction cannot be enforced safely.",
+                            e
+                        ),
+                        retryable: false,
+                    });
+                    return;
+                }
+            },
+            None => None,
+        };
 
         self.session.push_message(ChatMessage::user(prompt));
         self.emit_context_update().await;
@@ -547,33 +767,39 @@ impl AgentCore {
                     telemetry.log_error(&self.session.id, &msg, false);
                 }
                 let _ = self.event_tx.send(CoreEvent::ApiError {
+                    session_id: Some(session_id.clone()),
                     message: msg,
                     retryable: false,
                 });
                 break;
             }
 
-            let context_window = match self.provider.as_ref() {
-                Some(provider) => match provider.context_window().await {
-                    Ok(context_window) => context_window,
-                    Err(e) => {
+            let context_window = match pending_context_window.take() {
+                Some(context_window) => context_window,
+                None => match self.provider.as_ref() {
+                    Some(provider) => match provider.context_window().await {
+                        Ok(context_window) => context_window,
+                        Err(e) => {
+                            let _ = self.event_tx.send(CoreEvent::ApiError {
+                                session_id: Some(session_id.clone()),
+                                message: format!(
+                                    "Cannot determine provider context window: {}. Omnix will not send this prompt because context compaction cannot be enforced safely.",
+                                    e
+                                ),
+                                retryable: false,
+                            });
+                            return;
+                        }
+                    },
+                    None => {
                         let _ = self.event_tx.send(CoreEvent::ApiError {
-                            message: format!(
-                                "Cannot determine provider context window: {}. Omnix will not send this prompt because context compaction cannot be enforced safely.",
-                                e
-                            ),
+                            session_id: Some(session_id.clone()),
+                            message: "Choose a provider before sending a prompt.".to_string(),
                             retryable: false,
                         });
                         return;
                     }
                 },
-                None => {
-                    let _ = self.event_tx.send(CoreEvent::ApiError {
-                        message: "Choose a provider before sending a prompt.".to_string(),
-                        retryable: false,
-                    });
-                    return;
-                }
             };
 
             let budget = self.context_budget(context_window);
@@ -601,6 +827,7 @@ impl AgentCore {
             let current_tokens = self.estimate_context_tokens(&system_prompt);
             if current_tokens > budget.input_budget {
                 let _ = self.event_tx.send(CoreEvent::ApiError {
+                    session_id: Some(session_id.clone()),
                     message: format!(
                         "Context is still too large after compaction ({} estimated tokens, {} token input budget for {} context with {} output reserve and {} safety margin). Start a new session or reduce recent tool output.",
                         current_tokens,
@@ -630,11 +857,13 @@ impl AgentCore {
             };
 
             let _ = self.event_tx.send(CoreEvent::TurnStarted {
+                session_id: session_id.clone(),
                 model: self.session.model.clone(),
             });
 
             let Some(provider) = self.provider.as_ref() else {
                 let _ = self.event_tx.send(CoreEvent::ApiError {
+                    session_id: Some(session_id.clone()),
                     message: "Choose a provider before sending a prompt.".to_string(),
                     retryable: false,
                 });
@@ -648,6 +877,7 @@ impl AgentCore {
                         telemetry.log_error(&self.session.id, &e.to_string(), true);
                     }
                     let _ = self.event_tx.send(CoreEvent::ApiError {
+                        session_id: Some(session_id.clone()),
                         message: e.to_string(),
                         retryable: true,
                     });
@@ -672,6 +902,7 @@ impl AgentCore {
                             .push_message(ChatMessage::assistant_text(text_buffer));
                     }
                     let _ = self.event_tx.send(CoreEvent::TurnEnded {
+                        session_id: session_id.clone(),
                         stop_reason: StopReason::EndTurn,
                         usage: latest_usage,
                     });
@@ -687,7 +918,10 @@ impl AgentCore {
                         ..
                     } => {
                         text_buffer.push_str(&text);
-                        let _ = self.event_tx.send(CoreEvent::TokenDelta { text });
+                        let _ = self.event_tx.send(CoreEvent::TokenDelta {
+                            session_id: session_id.clone(),
+                            text,
+                        });
                     }
                     StreamEvent::ToolCallMeta { index, id, name } => {
                         tool_meta.insert(index, (id, name));
@@ -727,6 +961,7 @@ impl AgentCore {
                                     }
                                     Err(e) => {
                                         let _ = self.event_tx.send(CoreEvent::ToolError {
+                                            session_id: session_id.clone(),
                                             call_id: id.clone(),
                                             message: format!("Malformed tool input JSON: {}", e),
                                         });
@@ -772,6 +1007,7 @@ impl AgentCore {
                                 latest_usage
                             };
                             let _ = self.event_tx.send(CoreEvent::TurnEnded {
+                                session_id: session_id.clone(),
                                 stop_reason: reason,
                                 usage: usage.clone(),
                             });
@@ -795,6 +1031,7 @@ impl AgentCore {
                             telemetry.log_error(&self.session.id, &message, true);
                         }
                         let _ = self.event_tx.send(CoreEvent::ApiError {
+                            session_id: Some(session_id.clone()),
                             message,
                             retryable: true,
                         });
@@ -816,6 +1053,7 @@ impl AgentCore {
                     Ok(v) => v,
                     Err(e) => {
                         let _ = self.event_tx.send(CoreEvent::ToolError {
+                            session_id: session_id.clone(),
                             call_id: id.clone(),
                             message: format!("Invalid JSON: {}", e),
                         });
@@ -828,6 +1066,7 @@ impl AgentCore {
                 };
 
                 let _ = self.event_tx.send(CoreEvent::ToolCallStarted {
+                    session_id: session_id.clone(),
                     id: id.clone(),
                     name: name.clone(),
                     input: input.clone(),
@@ -841,6 +1080,7 @@ impl AgentCore {
                     AuthResult::Deny { reason } => {
                         let output = crate::tools::ToolOutput::err(reason);
                         let _ = self.event_tx.send(CoreEvent::ToolCallCompleted {
+                            session_id: session_id.clone(),
                             id: id.clone(),
                             name: name.clone(),
                             output: omnix_protocol::ToolResultContent::err(output.content.clone()),
@@ -853,6 +1093,7 @@ impl AgentCore {
                         risk_level,
                     } => {
                         let _ = self.event_tx.send(CoreEvent::ApprovalRequested {
+                            session_id: session_id.clone(),
                             call_id: id.clone(),
                             tool_name: name.clone(),
                             tool_input: input.clone(),
@@ -870,6 +1111,7 @@ impl AgentCore {
                             ApprovalResponse::Deny => {
                                 let output = crate::tools::ToolOutput::err("User denied approval");
                                 let _ = self.event_tx.send(CoreEvent::ToolCallCompleted {
+                                    session_id: session_id.clone(),
                                     id: id.clone(),
                                     name: name.clone(),
                                     output: omnix_protocol::ToolResultContent::err(
@@ -889,6 +1131,7 @@ impl AgentCore {
                         let output = output.with_limited_model_content();
                         let duration_ms = tool_start.elapsed().as_millis() as u64;
                         let _ = self.event_tx.send(CoreEvent::ToolCallCompleted {
+                            session_id: session_id.clone(),
                             id: id.clone(),
                             name: name.clone(),
                             output: omnix_protocol::ToolResultContent::ok(output.content.clone()),
@@ -907,6 +1150,7 @@ impl AgentCore {
                     Err(e) => {
                         let duration_ms = tool_start.elapsed().as_millis() as u64;
                         let _ = self.event_tx.send(CoreEvent::ToolError {
+                            session_id: session_id.clone(),
                             call_id: id.clone(),
                             message: e.to_string(),
                         });
@@ -951,6 +1195,7 @@ impl AgentCore {
             let system_prompt = self.build_system_prompt();
             let current_tokens = self.estimate_context_tokens(&system_prompt);
             let _ = self.event_tx.send(CoreEvent::ApiError {
+                session_id: Some(self.session.id.clone()),
                 message: format!(
                     "Context is too large ({} estimated tokens, {} token input budget) but there is no older history that can be compacted safely. Start a new session or reduce recent tool output.",
                     current_tokens, budget.input_budget,
@@ -971,6 +1216,7 @@ impl AgentCore {
         let summary = {
             let Some(provider) = self.provider.as_ref() else {
                 let _ = self.event_tx.send(CoreEvent::ApiError {
+                    session_id: Some(self.session.id.clone()),
                     message: "Cannot compact without a provider.".to_string(),
                     retryable: false,
                 });
@@ -983,6 +1229,7 @@ impl AgentCore {
                 Ok(summary) => summary,
                 Err(e) => {
                     let _ = self.event_tx.send(CoreEvent::ApiError {
+                        session_id: Some(self.session.id.clone()),
                         message: format!("Compaction failed: {}", e),
                         retryable: false,
                     });
@@ -1085,7 +1332,7 @@ impl AgentCore {
                         return response;
                     }
                 }
-                CoreCommand::CancelTurn => {
+                CoreCommand::CancelTurn { .. } => {
                     return ApprovalResponse::Deny;
                 }
                 CoreCommand::Shutdown => {
@@ -1095,6 +1342,7 @@ impl AgentCore {
                 CoreCommand::SetModel { model } => {
                     if !self.session.messages.is_empty() {
                         let _ = self.event_tx.send(CoreEvent::ApiError {
+                            session_id: Some(self.session.id.clone()),
                             message: "Model is locked for sessions that already have messages. Create a new session to use a different model.".to_string(),
                             retryable: false,
                         });
@@ -1104,6 +1352,7 @@ impl AgentCore {
                     if !self.session.provider.trim().is_empty() {
                         if let Err(e) = self.rebuild_provider_for_session() {
                             let _ = self.event_tx.send(CoreEvent::ApiError {
+                                session_id: Some(self.session.id.clone()),
                                 message: format!("Failed to switch model: {}", e),
                                 retryable: false,
                             });
@@ -1114,6 +1363,7 @@ impl AgentCore {
                 CoreCommand::SetProvider { provider } => {
                     if !self.session.messages.is_empty() {
                         let _ = self.event_tx.send(CoreEvent::ApiError {
+                            session_id: Some(self.session.id.clone()),
                             message: "Provider is locked for sessions that already have messages. Create a new session to use a different provider.".to_string(),
                             retryable: false,
                         });
@@ -1122,6 +1372,7 @@ impl AgentCore {
                     let kind = Self::provider_kind_name(&provider).to_string();
                     if let Err(e) = self.switch_provider(&kind) {
                         let _ = self.event_tx.send(CoreEvent::ApiError {
+                            session_id: Some(self.session.id.clone()),
                             message: format!("Failed to switch provider: {}", e),
                             retryable: false,
                         });
@@ -1407,6 +1658,7 @@ mod tests {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         cmd_tx
             .send(CoreCommand::SendPrompt {
+                session_id: None,
                 text: "latest request".into(),
             })
             .unwrap();
@@ -1448,6 +1700,7 @@ mod tests {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         cmd_tx
             .send(CoreCommand::SendPrompt {
+                session_id: None,
                 text: "latest request".into(),
             })
             .unwrap();
@@ -1460,12 +1713,13 @@ mod tests {
             _ => unreachable!(),
         };
         assert_eq!(stream_calls, 0);
+        assert!(core.session.messages.is_empty());
 
         let mut events = Vec::new();
         while let Ok(event) = event_rx.try_recv() {
             events.push(event);
         }
-        assert!(events.iter().any(|e| matches!(e, CoreEvent::ApiError { message, retryable } if message.contains("Cannot determine provider context window") && !retryable)));
+        assert!(events.iter().any(|e| matches!(e, CoreEvent::ApiError { message, retryable, .. } if message.contains("Cannot determine provider context window") && !retryable)));
         assert!(
             !events
                 .iter()
@@ -1493,6 +1747,7 @@ mod tests {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         cmd_tx
             .send(CoreCommand::SendPrompt {
+                session_id: None,
                 text: "latest request".into(),
             })
             .unwrap();
@@ -1515,7 +1770,7 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, CoreEvent::SessionCompacted { .. }))
         );
-        assert!(events.iter().any(|e| matches!(e, CoreEvent::ApiError { message, retryable } if message.contains("Context is still too large after compaction") && !retryable)));
+        assert!(events.iter().any(|e| matches!(e, CoreEvent::ApiError { message, retryable, .. } if message.contains("Context is still too large after compaction") && !retryable)));
         assert!(
             !events
                 .iter()
@@ -1608,6 +1863,7 @@ mod tests {
         });
         cmd_tx
             .send(CoreCommand::SendPrompt {
+                session_id: None,
                 text: "say hello".into(),
             })
             .unwrap();
@@ -1624,9 +1880,9 @@ mod tests {
                 .any(|e| matches!(e, CoreEvent::TurnStarted { .. }))
         );
         assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, CoreEvent::TokenDelta { text } if text == "I'll echo that."))
+            events.iter().any(
+                |e| matches!(e, CoreEvent::TokenDelta { text, .. } if text == "I'll echo that.")
+            )
         );
         assert!(events.iter().any(|e| matches!(e, CoreEvent::ToolCallStarted { id, name, .. } if id == "call_1" && name == "echo")));
         assert!(
@@ -1637,7 +1893,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, CoreEvent::TokenDelta { text } if text == "Done!"))
+                .any(|e| matches!(e, CoreEvent::TokenDelta { text, .. } if text == "Done!"))
         );
         assert!(events.iter().any(|e| matches!(
             e,
@@ -1699,6 +1955,7 @@ mod tests {
         });
         cmd_tx
             .send(CoreCommand::SendPrompt {
+                session_id: None,
                 text: "test".into(),
             })
             .unwrap();

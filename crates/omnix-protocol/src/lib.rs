@@ -24,6 +24,7 @@ mod tests {
     #[test]
     fn event_roundtrip() {
         let event = CoreEvent::TokenDelta {
+            session_id: "session-1".into(),
             text: "hello".into(),
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -35,6 +36,7 @@ mod tests {
     #[test]
     fn command_roundtrip() {
         let cmd = CoreCommand::SendPrompt {
+            session_id: None,
             text: "list files".into(),
         };
         let json = serde_json::to_string(&cmd).unwrap();
@@ -47,6 +49,7 @@ mod tests {
     #[test]
     fn approval_requested_json() {
         let event = CoreEvent::ApprovalRequested {
+            session_id: "session-1".into(),
             call_id: "call_1".into(),
             tool_name: "bash".into(),
             tool_input: serde_json::json!({"command": "rm -rf /tmp"}),

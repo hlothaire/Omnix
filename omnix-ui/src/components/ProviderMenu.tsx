@@ -32,14 +32,15 @@ const providers = [
 
 export function ProviderMenu() {
   const { provider, model } = useSettingsStore();
-  const { messages } = useChatStore();
+  const { messages, streamingSessionIds } = useChatStore();
   const [open, setOpen] = useState(false);
   const [draftProvider, setDraftProvider] = useState(provider);
   const [draftModel, setDraftModel] = useState(model);
   const [models, setModels] = useState<string[]>([]);
   const [isLoadingModels, setIsLoadingModels] = useState(false);
   const [modelError, setModelError] = useState<string | null>(null);
-  const isLocked = messages.length > 0;
+  const hasStreamingSession = Object.keys(streamingSessionIds).length > 0;
+  const isLocked = messages.length > 0 || hasStreamingSession;
 
   useEffect(() => {
     if (!open) return;
@@ -126,8 +127,9 @@ export function ProviderMenu() {
         <div className="flex flex-col gap-4">
           {isLocked && (
             <div className="rounded-lg border border-border bg-secondary/60 px-3 py-2 text-xs text-muted-foreground">
-              This session already has messages, so its provider and model are locked.
-              Create a new session to use a different runtime.
+              {hasStreamingSession
+                ? "Provider and model are locked while any session is streaming."
+                : "This session already has messages, so its provider and model are locked. Create a new session to use a different runtime."}
             </div>
           )}
 

@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use omnix_protocol::{ChatMessage, ContentBlock, Role};
 
 /// In-memory conversation session with disk persistence.
+#[derive(Clone)]
 pub struct Session {
     pub id: String,
     pub created_at: DateTime<Utc>,

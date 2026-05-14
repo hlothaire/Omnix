@@ -56,21 +56,21 @@ export interface SessionListEntry {
 }
 
 export type CoreEvent =
-  | { event: "token_delta"; text: string }
-  | { event: "thinking_delta"; thinking: string }
-  | { event: "tool_call_started"; id: string; name: string; input: Record<string, unknown> }
-  | { event: "tool_call_completed"; id: string; name: string; output: { output: string; is_error: boolean } }
-  | { event: "tool_error"; call_id: string; message: string }
-  | { event: "turn_started"; model: string }
-  | { event: "turn_ended"; stop_reason: StopReason; usage: { input_tokens: number; output_tokens: number } }
-  | { event: "approval_requested"; call_id: string; tool_name: string; tool_input: Record<string, unknown>; risk_level: RiskLevel; description: string }
+  | { event: "token_delta"; session_id: string; text: string }
+  | { event: "thinking_delta"; session_id: string; thinking: string }
+  | { event: "tool_call_started"; session_id: string; id: string; name: string; input: Record<string, unknown> }
+  | { event: "tool_call_completed"; session_id: string; id: string; name: string; output: { output: string; is_error: boolean } }
+  | { event: "tool_error"; session_id: string; call_id: string; message: string }
+  | { event: "turn_started"; session_id: string; model: string }
+  | { event: "turn_ended"; session_id: string; stop_reason: StopReason; usage: { input_tokens: number; output_tokens: number } }
+  | { event: "approval_requested"; session_id: string; call_id: string; tool_name: string; tool_input: Record<string, unknown>; risk_level: RiskLevel; description: string }
   | { event: "session_created"; id: string; provider: string; model: string }
   | { event: "session_loaded"; id: string; messages: ChatMessage[]; total_input_tokens: number; total_output_tokens: number; title: string; provider: string; model: string }
   | { event: "session_saved"; id: string }
   | { event: "session_deleted"; id: string }
   | { event: "session_listed"; sessions: SessionListEntry[] }
   | { event: "session_compacted"; session_id: string; summary: string; removed_count: number; messages: ChatMessage[]; tokens_before: number; input_budget: number; first_kept_index: number }
-  | { event: "api_error"; message: string; retryable: boolean }
+  | { event: "api_error"; session_id?: string | null; message: string; retryable: boolean }
   | { event: "fatal_error"; message: string }
   | { event: "max_iterations_reached"; limit: number }
   | { event: "context_updated"; session_id: string; used_tokens: number; max_tokens: number | null; percent: number | null }

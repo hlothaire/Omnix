@@ -1,5 +1,6 @@
 import { useRef, KeyboardEvent } from "react";
 import { useChatStore } from "@/store/chat";
+import { useSessionStore } from "@/store/sessions";
 import { cancelTurn } from "@/lib/commands";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -7,11 +8,12 @@ import { Send, Square, Sparkles } from "lucide-react";
 
 export function PromptInput() {
   const { inputText, setInputText, submitPrompt, isStreaming } = useChatStore();
+  const { activeSessionId } = useSessionStore();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const handleSend = () => {
     if (isStreaming) {
-      cancelTurn();
+      cancelTurn(activeSessionId);
       return;
     }
     submitPrompt();

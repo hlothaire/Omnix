@@ -24,6 +24,7 @@ struct TelemetryRecord {
 }
 
 /// Telemetry sink configuration.
+#[derive(Clone)]
 pub struct TelemetrySink {
     /// Channel sender for the background writer.
     tx: mpsc::UnboundedSender<TelemetryRecord>,

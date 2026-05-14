@@ -8,29 +8,36 @@ use crate::types::{TokenUsage, ToolResultContent};
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum CoreEvent {
     TokenDelta {
+        session_id: String,
         text: String,
     },
     ThinkingDelta {
+        session_id: String,
         thinking: String,
     },
     ToolCallStarted {
+        session_id: String,
         id: String,
         name: String,
         input: serde_json::Value,
     },
     ToolCallCompleted {
+        session_id: String,
         id: String,
         name: String,
         output: ToolResultContent,
     },
     TurnStarted {
+        session_id: String,
         model: String,
     },
     TurnEnded {
+        session_id: String,
         stop_reason: StopReason,
         usage: TokenUsage,
     },
     ApprovalRequested {
+        session_id: String,
         call_id: String,
         tool_name: String,
         tool_input: serde_json::Value,
@@ -91,10 +98,12 @@ pub enum CoreEvent {
         name: String,
     },
     ApiError {
+        session_id: Option<String>,
         message: String,
         retryable: bool,
     },
     ToolError {
+        session_id: String,
         call_id: String,
         message: String,
     },

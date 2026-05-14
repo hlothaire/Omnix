@@ -1,4 +1,5 @@
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result};
@@ -346,6 +347,7 @@ fn parse_sse_stream(
     Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(rx))
 }
 
+#[derive(Clone)]
 pub struct LlamaCppProvider {
     client: Client,
     base_url: String,
@@ -579,6 +581,7 @@ struct LlamaGenerationParams {
     n_ctx: Option<u64>,
 }
 
+#[derive(Clone)]
 pub enum AnyProvider {
     LlamaCpp(LlamaCppProvider),
     Ollama(ollama::OllamaProvider),
@@ -655,9 +658,10 @@ impl Provider for AnyProvider {
     }
 }
 
+#[derive(Clone)]
 pub struct MockProvider {
-    turns: Vec<Vec<StreamEvent>>,
-    call_index: AtomicUsize,
+    turns: Arc<Vec<Vec<StreamEvent>>>,
+    call_index: Arc<AtomicUsize>,
     context_window: usize,
     context_error: Option<String>,
     summarize_error: Option<String>,
@@ -667,8 +671,8 @@ pub struct MockProvider {
 impl MockProvider {
     pub fn new(turns: Vec<Vec<StreamEvent>>) -> Self {
         Self {
-            turns,
-            call_index: AtomicUsize::new(0),
+            turns: Arc::new(turns),
+            call_index: Arc::new(AtomicUsize::new(0)),
             context_window: 4096,
             context_error: None,
             summarize_error: None,

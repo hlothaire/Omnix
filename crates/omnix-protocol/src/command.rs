@@ -6,13 +6,18 @@ use crate::enums::{ApprovalResponse, MemoryAction, MemoryTarget, PermissionMode,
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum CoreCommand {
     SendPrompt {
+        #[serde(default)]
+        session_id: Option<String>,
         text: String,
     },
     RespondToApproval {
         call_id: String,
         response: ApprovalResponse,
     },
-    CancelTurn,
+    CancelTurn {
+        #[serde(default)]
+        session_id: Option<String>,
+    },
     NewSession,
     LoadSession {
         id: String,

@@ -1,11 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export const sendPrompt = (text: string) => invoke("send_prompt", { text });
+export const sendPrompt = (text: string, sessionId?: string | null) => invoke("send_prompt", { text, sessionId });
 export const newSession = () => invoke("new_session");
 export const loadSession = (id: string) => invoke("load_session", { id });
 export const deleteSession = (id: string) => invoke("delete_session", { id });
 export const listSessions = () => invoke("list_sessions");
-export const cancelTurn = () => invoke("cancel_turn");
+export const cancelTurn = (sessionId?: string | null) => invoke("cancel_turn", { sessionId });
 export const saveSession = () => invoke("save_session");
 export const renameSession = (id: string, title: string) => invoke("rename_session", { id, title });
 export const setProvider = (provider: string) => invoke("set_provider", { provider });

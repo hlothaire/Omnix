@@ -16,6 +16,7 @@ pub enum AuthResult {
 }
 
 /// Layered permission enforcement for tool execution.
+#[derive(Clone)]
 pub struct PermissionEnforcer {
     mode: PermissionMode,
     session_allowed: HashSet<String>,

@@ -36,11 +36,10 @@ export function useCoreEvents() {
             switch (event.event) {
               case "token_delta": {
                 const activeId = useSessionStore.getState().activeSessionId ?? "";
-                if (chat.isStreamingForSession(activeId)) {
+                if (event.session_id === activeId) {
                   chat.appendToken(event.text);
                 } else {
-                  const sid = useChatStore.getState().streamingSessionId;
-                  if (sid) applyToSnapshot(sid, (msgs) => {
+                  applyToSnapshot(event.session_id, (msgs) => {
                     const next = [...msgs];
                     const last = next[next.length - 1];
                     if (last && last.role.toLowerCase() === "assistant") {
@@ -55,11 +54,10 @@ export function useCoreEvents() {
               }
               case "thinking_delta": {
                 const activeId = useSessionStore.getState().activeSessionId ?? "";
-                if (chat.isStreamingForSession(activeId)) {
+                if (event.session_id === activeId) {
                   chat.appendThinking(event.thinking);
                 } else {
-                  const sid = useChatStore.getState().streamingSessionId;
-                  if (sid) applyToSnapshot(sid, (msgs) => {
+                  applyToSnapshot(event.session_id, (msgs) => {
                     const next = [...msgs];
                     const last = next[next.length - 1];
                     if (last && last.role.toLowerCase() === "assistant") {
@@ -74,11 +72,10 @@ export function useCoreEvents() {
               }
               case "tool_call_started": {
                 const activeId = useSessionStore.getState().activeSessionId ?? "";
-                if (chat.isStreamingForSession(activeId)) {
+                if (event.session_id === activeId) {
                   chat.startToolCall(event.id, event.name, event.input);
                 } else {
-                  const sid = useChatStore.getState().streamingSessionId;
-                  if (sid) applyToSnapshot(sid, (msgs) => {
+                  applyToSnapshot(event.session_id, (msgs) => {
                     const next = [...msgs];
                     const last = next[next.length - 1];
                     const toolCall = { callId: event.id, name: event.name, input: event.input, isError: false };
@@ -94,16 +91,15 @@ export function useCoreEvents() {
               }
               case "tool_call_completed": {
                 const activeId = useSessionStore.getState().activeSessionId ?? "";
-                if (chat.isStreamingForSession(activeId)) {
+                if (event.session_id === activeId) {
                   chat.completeToolCall(event.id, event.output.output, event.output.is_error);
                 } else {
-                  const sid = useChatStore.getState().streamingSessionId;
-                  if (sid) applyToSnapshot(sid, (msgs) => msgs.map((m) => ({
+                  applyToSnapshot(event.session_id, (msgs) => msgs.map((m) => ({
                     ...m,
                     toolCalls: m.toolCalls.map((tc) =>
                       tc.callId === event.id
                         ? { ...tc, output: event.output.output, isError: event.output.is_error }
-                        : tc
+                      : tc
                     ),
                   })));
                 }
@@ -111,32 +107,31 @@ export function useCoreEvents() {
               }
               case "tool_error": {
                 const activeId = useSessionStore.getState().activeSessionId ?? "";
-                if (chat.isStreamingForSession(activeId)) {
+                if (event.session_id === activeId) {
                   chat.toolError(event.call_id, event.message);
                 } else {
-                  const sid = useChatStore.getState().streamingSessionId;
-                  if (sid) applyToSnapshot(sid, (msgs) => msgs.map((m) => ({
+                  applyToSnapshot(event.session_id, (msgs) => msgs.map((m) => ({
                     ...m,
                     toolCalls: m.toolCalls.map((tc) =>
                       tc.callId === event.call_id
                         ? { ...tc, output: event.message, isError: true }
-                        : tc
+                      : tc
                     ),
                   })));
                 }
                 break;
               }
               case "turn_started":
-                chat.setStreamingSession(useSessionStore.getState().activeSessionId);
+                chat.setSessionStreaming(event.session_id, true);
                 break;
               case "turn_ended": {
-                const streamingId = useChatStore.getState().streamingSessionId;
-                if (chat.isStreamingForSession(useSessionStore.getState().activeSessionId ?? "")) {
+                const activeId = useSessionStore.getState().activeSessionId ?? "";
+                if (event.session_id === activeId) {
                   chat.addTokens(event.usage.input_tokens, event.usage.output_tokens);
-                } else if (streamingId) {
-                  const snap = useTabStore.getState().snapshots[streamingId];
+                } else {
+                  const snap = useTabStore.getState().snapshots[event.session_id];
                   if (snap) {
-                    useTabStore.getState().saveSnapshot(streamingId, {
+                    useTabStore.getState().saveSnapshot(event.session_id, {
                       ...snap,
                       isStreaming: false,
                       totalInputTokens: snap.totalInputTokens + event.usage.input_tokens,
@@ -144,7 +139,7 @@ export function useCoreEvents() {
                     });
                   }
                 }
-                chat.setStreamingSession(null);
+                chat.setSessionStreaming(event.session_id, false);
                 break;
               }
               case "approval_requested":
@@ -195,7 +190,14 @@ export function useCoreEvents() {
                 routeSessionCompacted(event);
                 break;
               case "api_error":
-                chat.addErrorMessage(event.message);
+                if (!event.session_id || event.session_id === (useSessionStore.getState().activeSessionId ?? "")) {
+                  chat.addErrorMessage(event.message);
+                } else {
+                  applyToSnapshot(event.session_id, (msgs) => [
+                    ...msgs,
+                    { role: "Assistant", text: `Error: ${event.message}`, thinking: "", toolCalls: [], isError: true, time: new Date().toLocaleTimeString() },
+                  ]);
+                }
                 break;
               case "fatal_error":
                 chat.addErrorMessage(`Fatal: ${event.message}`);
