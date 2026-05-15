@@ -42,13 +42,19 @@ fn send_prompt(state: State<AppState>, text: String, session_id: Option<String>)
 }
 
 #[tauri::command]
-fn respond_to_approval(state: State<AppState>, call_id: String, response: String) {
+fn respond_to_approval(
+    state: State<AppState>,
+    session_id: String,
+    call_id: String,
+    response: String,
+) {
     let resp = match response.as_str() {
         "allow_once" => ApprovalResponse::AllowOnce,
         "allow_for_session" => ApprovalResponse::AllowForSession,
         _ => ApprovalResponse::Deny,
     };
     let _ = state.cmd_tx.send(CoreCommand::RespondToApproval {
+        session_id,
         call_id,
         response: resp,
     });

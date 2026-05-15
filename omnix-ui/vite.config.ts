@@ -13,6 +13,21 @@ export default defineConfig(async () => ({
     },
   },
   clearScreen: false,
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return undefined;
+          if (id.includes("@base-ui")) return "base-ui-vendor";
+          if (id.includes("/react/") || id.includes("/react-dom/") || id.includes("/scheduler/")) return "react-vendor";
+          if (id.includes("react-markdown") || id.includes("rehype-") || id.includes("remark-") || id.includes("micromark") || id.includes("mdast") || id.includes("hast") || id.includes("unified")) return "markdown-vendor";
+          if (id.includes("react-virtuoso")) return "list-vendor";
+          if (id.includes("lucide-react")) return "icons-vendor";
+          return "react-vendor";
+        },
+      },
+    },
+  },
   server: {
     port: 1420,
     strictPort: true,

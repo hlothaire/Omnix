@@ -32,6 +32,10 @@ impl OllamaProvider {
             model: model.into(),
         }
     }
+
+    pub fn host(&self) -> &str {
+        &self.base_url
+    }
 }
 
 impl Provider for OllamaProvider {

@@ -29,6 +29,7 @@ export interface ToolCallDisplay {
 }
 
 export interface PendingApproval {
+  sessionId: string;
   callId: string;
   toolName: string;
   toolInput: Record<string, unknown>;

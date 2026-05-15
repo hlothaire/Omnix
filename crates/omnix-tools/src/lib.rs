@@ -6,6 +6,7 @@ pub mod glob;
 pub mod grep;
 pub mod list_dir;
 pub mod memory;
+pub mod memory_store;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;

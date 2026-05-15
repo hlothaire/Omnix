@@ -105,7 +105,6 @@ impl AgentCore {
         provider_host: String,
         tools: ToolRegistry,
         permissions: PermissionEnforcer,
-        _prompt_builder: SystemPromptBuilder,
         memory_store_path: PathBuf,
         sessions_dir: PathBuf,
         event_tx: mpsc::UnboundedSender<CoreEvent>,
@@ -158,7 +157,8 @@ impl AgentCore {
         let (host, provider) = if kind.trim().is_empty() {
             (host, None)
         } else {
-            let (resolved_host, provider) = Self::build_provider(&kind, &host, &model)?;
+            let provider = AnyProvider::from_kind(&kind, &host, &model)?;
+            let resolved_host = provider.resolved_host().to_string();
             (resolved_host, Some(provider))
         };
 
@@ -191,45 +191,35 @@ impl AgentCore {
             _ => PermissionMode::WorkspaceWrite,
         };
         let permissions = PermissionEnforcer::new(mode);
-        let prompt_builder = SystemPromptBuilder::new(mode).with_tools(tools.tool_definitions());
-
-        Ok(Self::new(
+        let mut core = Self::new(
             provider,
             model,
             kind.clone(),
             host,
             tools,
             permissions,
-            prompt_builder,
             memory_path,
             sessions_dir,
             event_tx,
         )
-        .with_compaction(config.compaction.clone()))
+        .with_compaction(config.compaction.clone());
+
+        if config.telemetry.enabled {
+            let path = AppConfig::expand_home(&config.telemetry.path)?;
+            let max_size_bytes = config
+                .telemetry
+                .max_file_size_mb
+                .saturating_mul(1024 * 1024);
+            core = core.with_telemetry(TelemetrySink::new(path, max_size_bytes));
+        }
+
+        Ok(core)
     }
 
     fn build_provider(kind: &str, host: &str, model: &str) -> Result<(String, AnyProvider)> {
-        match kind {
-            "ollama" => {
-                let h = if host.is_empty() || host == "http://localhost:8080" {
-                    "http://localhost:11434".to_string()
-                } else {
-                    host.to_string()
-                };
-                let p =
-                    AnyProvider::Ollama(crate::provider::ollama::OllamaProvider::new(&h, model));
-                Ok((h, p))
-            }
-            _ => {
-                let h = if host.is_empty() || host == "http://localhost:11434" {
-                    "http://localhost:8080".to_string()
-                } else {
-                    host.to_string()
-                };
-                let p = AnyProvider::LlamaCpp(crate::provider::LlamaCppProvider::new(&h, model));
-                Ok((h, p))
-            }
-        }
+        let provider = AnyProvider::from_kind(kind, host, model)?;
+        let resolved_host = provider.resolved_host().to_string();
+        Ok((resolved_host, provider))
     }
 
     fn provider_kind_name(provider: &omnix_protocol::ProviderKind) -> &'static str {
@@ -396,7 +386,6 @@ impl AgentCore {
                         host,
                         self.tools.clone(),
                         self.permissions.clone(),
-                        SystemPromptBuilder::new(self.permissions.mode()),
                         self.memory_store_path.clone(),
                         self.sessions_dir.clone(),
                         self.event_tx.clone(),
@@ -708,8 +697,8 @@ impl AgentCore {
                     }
                     break;
                 }
-                CoreCommand::RespondToApproval { .. } => {
-                    for running in running_turns.values() {
+                CoreCommand::RespondToApproval { ref session_id, .. } => {
+                    if let Some(running) = running_turns.get(session_id) {
                         let _ = running.cmd_tx.send(cmd.clone());
                     }
                 }
@@ -1345,10 +1334,11 @@ impl AgentCore {
         while let Some(cmd) = command_rx.recv().await {
             match cmd {
                 CoreCommand::RespondToApproval {
+                    session_id,
                     call_id: resp_id,
                     response,
                 } => {
-                    if resp_id == call_id {
+                    if session_id == self.session.id && resp_id == call_id {
                         return response;
                     }
                 }
@@ -1559,7 +1549,6 @@ mod tests {
 
     use super::*;
     use crate::permissions::PermissionEnforcer;
-    use crate::prompt::SystemPromptBuilder;
     use crate::provider::{AnyProvider, LlamaCppProvider, MockProvider};
     use crate::tools::{Tool, ToolContext, ToolError, ToolOutput, ToolRegistry};
     use futures::future::BoxFuture;
@@ -1572,7 +1561,6 @@ mod tests {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let tools = ToolRegistry::new();
         let permissions = PermissionEnforcer::new(PermissionMode::Allow);
-        let prompt = SystemPromptBuilder::new(PermissionMode::Allow);
 
         let core = AgentCore::new(
             Some(provider),
@@ -1581,7 +1569,6 @@ mod tests {
             "http://localhost:9999".into(),
             tools,
             permissions,
-            prompt,
             PathBuf::from("/tmp/test_memory.md"),
             PathBuf::from("/tmp/test_sessions"),
             event_tx,
@@ -2074,6 +2061,7 @@ mod tests {
 
         let provider = AnyProvider::Mock(MockProvider::new(vec![turn1, turn2]));
         let (mut core, mut event_rx) = setup_core_with_provider(provider);
+        let session_id = core.session.id.clone();
         core.permissions.set_mode(PermissionMode::Prompt);
         core.tools.register(Arc::new(EchoTool));
 
@@ -2082,6 +2070,7 @@ mod tests {
         tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
             let _ = cmd_tx2.send(CoreCommand::RespondToApproval {
+                session_id,
                 call_id: "call_1".into(),
                 response: ApprovalResponse::AllowOnce,
             });

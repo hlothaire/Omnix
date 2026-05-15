@@ -19,8 +19,8 @@ export function ApprovalModal() {
   const first = entries[0];
 
   const handleRespond = (response: string) => {
-    respondToApproval(first.callId, response);
-    removeApproval(first.callId);
+    respondToApproval(first.sessionId, first.callId, response);
+    removeApproval(first.sessionId, first.callId);
   };
 
   return (

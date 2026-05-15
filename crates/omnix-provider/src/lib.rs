@@ -368,6 +368,10 @@ impl LlamaCppProvider {
             model: model.into(),
         }
     }
+
+    pub fn host(&self) -> &str {
+        &self.base_url
+    }
 }
 
 impl Provider for LlamaCppProvider {
@@ -609,6 +613,14 @@ impl AnyProvider {
                 Ok(AnyProvider::LlamaCpp(LlamaCppProvider::new(h, model)))
             }
             _ => anyhow::bail!("Unknown provider kind: {}", kind),
+        }
+    }
+
+    pub fn resolved_host(&self) -> &str {
+        match self {
+            AnyProvider::LlamaCpp(p) => p.host(),
+            AnyProvider::Ollama(p) => p.host(),
+            AnyProvider::Mock(_) => "",
         }
     }
 }

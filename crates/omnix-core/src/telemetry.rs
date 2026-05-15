@@ -159,18 +159,6 @@ impl TelemetrySink {
         );
     }
 
-    /// Log a provider response preview.
-    pub fn log_response(&self, session_id: &str, text_preview: &str) {
-        self.send(
-            session_id,
-            "interaction",
-            "response",
-            serde_json::json!({
-                "text_preview": truncate(text_preview, 500),
-            }),
-        );
-    }
-
     fn send(
         &self,
         session_id: &str,

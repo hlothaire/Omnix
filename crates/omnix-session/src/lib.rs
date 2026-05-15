@@ -147,51 +147,6 @@ impl Session {
         }
     }
 
-    /// Find the index where to split messages for compaction.
-    /// Keeps the last `keep_turns` complete user-assistant cycles.
-    /// Returns the index of the first message to KEEP (0 if nothing to compact).
-    pub fn find_split_index(&self, keep_turns: usize) -> usize {
-        if self.messages.len() < 2 {
-            return 0;
-        }
-
-        // Walk backwards to find turn boundaries
-        let mut turns_found = 0;
-        let mut split_idx = 0;
-
-        for (i, msg) in self.messages.iter().enumerate().rev() {
-            if msg.role == Role::User {
-                turns_found += 1;
-                if turns_found >= keep_turns {
-                    split_idx = i;
-                    break;
-                }
-            }
-        }
-
-        // If we didn't find enough turns, keep everything
-        if turns_found < keep_turns {
-            return 0;
-        }
-
-        // Make sure we don't split in the middle of a tool call pair
-        // If split_idx points to a tool result, move back to include its tool_use
-        if split_idx > 0
-            && let Some(msg) = self.messages.get(split_idx)
-            && msg.role == Role::Tool
-        {
-            // Find the preceding assistant message with matching tool_use
-            for j in (0..split_idx).rev() {
-                if self.messages[j].role == Role::Assistant {
-                    split_idx = j;
-                    break;
-                }
-            }
-        }
-
-        split_idx
-    }
-
     /// Compact the session by replacing old messages with a summary.
     /// `split_idx` is the index of the first message to keep.
     /// Returns the number of messages removed.
@@ -418,57 +373,6 @@ mod tests {
     fn test_estimated_tokens_empty() {
         let session = Session::new("test", "test");
         assert_eq!(session.estimated_tokens(), 1); // max(1)
-    }
-
-    #[test]
-    fn test_find_split_index_basic() {
-        let mut session = Session::new("test", "test");
-        // Add 3 turns: user1, assistant1, user2, assistant2, user3, assistant3
-        session.push_message(ChatMessage::user("Turn 1"));
-        session.push_message(ChatMessage::assistant_text("Response 1"));
-        session.push_message(ChatMessage::user("Turn 2"));
-        session.push_message(ChatMessage::assistant_text("Response 2"));
-        session.push_message(ChatMessage::user("Turn 3"));
-        session.push_message(ChatMessage::assistant_text("Response 3"));
-
-        // Keep last 2 turns -> should split at index 2 (start of turn 2)
-        let split = session.find_split_index(2);
-        assert_eq!(split, 2);
-    }
-
-    #[test]
-    fn test_find_split_index_keep_all() {
-        let mut session = Session::new("test", "test");
-        session.push_message(ChatMessage::user("Turn 1"));
-        session.push_message(ChatMessage::assistant_text("Response 1"));
-
-        // Request to keep 5 turns but only have 1 -> return 0 (keep all)
-        let split = session.find_split_index(5);
-        assert_eq!(split, 0);
-    }
-
-    #[test]
-    fn test_find_split_index_tool_pair_protection() {
-        let mut session = Session::new("test", "test");
-        session.push_message(ChatMessage::user("Turn 1"));
-        session.push_message(ChatMessage::assistant_text("Response 1"));
-        session.push_message(ChatMessage::user("Turn 2"));
-        // Assistant with tool call
-        let mut tool_msg = ChatMessage::assistant_text("Using tool");
-        tool_msg.content.push(ContentBlock::ToolUse {
-            id: "tool-1".into(),
-            name: "bash".into(),
-            input: serde_json::json!({"command": "ls"}),
-        });
-        session.push_message(tool_msg);
-        session.push_message(ChatMessage::tool_result("tool-1", "file.txt", false));
-        session.push_message(ChatMessage::user("Turn 3"));
-        session.push_message(ChatMessage::assistant_text("Response 3"));
-
-        // Keep last 1 turn -> split should protect the tool pair
-        let split = session.find_split_index(1);
-        // Should split at the user message of turn 3 (index 5)
-        assert_eq!(split, 5);
     }
 
     #[test]

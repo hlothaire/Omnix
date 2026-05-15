@@ -35,12 +35,14 @@ mod tests {
 
     #[test]
     fn command_roundtrip() {
-        let cmd = CoreCommand::SendPrompt {
-            session_id: None,
-            text: "list files".into(),
+        let cmd = CoreCommand::RespondToApproval {
+            session_id: "session-1".into(),
+            call_id: "call_1".into(),
+            response: ApprovalResponse::AllowOnce,
         };
         let json = serde_json::to_string(&cmd).unwrap();
-        assert!(json.contains("\"command\":\"send_prompt\""));
+        assert!(json.contains("\"command\":\"respond_to_approval\""));
+        assert!(json.contains("\"session_id\":\"session-1\""));
         let decoded: CoreCommand = serde_json::from_str(&json).unwrap();
         let json2 = serde_json::to_string(&decoded).unwrap();
         assert_eq!(json, json2);

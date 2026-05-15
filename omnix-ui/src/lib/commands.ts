@@ -14,6 +14,6 @@ export const listModels = (provider: string, host: string) => invoke<string[]>("
 export const setPermissionMode = (mode: string) => invoke("set_permission_mode", { mode });
 export const enableTool = (name: string) => invoke("enable_tool", { name });
 export const disableTool = (name: string) => invoke("disable_tool", { name });
-export const respondToApproval = (callId: string, response: string) =>
-  invoke("respond_to_approval", { callId, response });
+export const respondToApproval = (sessionId: string, callId: string, response: string) =>
+  invoke("respond_to_approval", { sessionId, callId, response });
 export const isTilingWM = () => invoke<boolean>("is_tiling_wm");

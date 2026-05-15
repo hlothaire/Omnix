@@ -116,6 +116,7 @@ export function useCoreEvents() {
               }
               case "approval_requested":
                 approvals.addApproval({
+                  sessionId: event.session_id,
                   callId: event.call_id,
                   toolName: event.tool_name,
                   toolInput: event.tool_input,

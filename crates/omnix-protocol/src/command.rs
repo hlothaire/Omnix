@@ -11,6 +11,7 @@ pub enum CoreCommand {
         text: String,
     },
     RespondToApproval {
+        session_id: String,
         call_id: String,
         response: ApprovalResponse,
     },
