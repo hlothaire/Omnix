@@ -75,15 +75,16 @@ fn list_sessions(state: State<AppState>) {
 }
 
 #[tauri::command]
-fn set_provider(state: State<AppState>, provider: String) {
+fn set_provider(state: State<AppState>, provider: String, host: String) {
     let kind = match provider.as_str() {
         "ollama" => ProviderKind::Ollama,
         "llama_cpp" | "llamacpp" => ProviderKind::LlamaCpp,
         _ => ProviderKind::LlamaCpp,
     };
-    let _ = state
-        .cmd_tx
-        .send(CoreCommand::SetProvider { provider: kind });
+    let _ = state.cmd_tx.send(CoreCommand::SetProvider {
+        provider: kind,
+        host,
+    });
 }
 
 #[tauri::command]
@@ -132,11 +133,16 @@ fn set_model(state: State<AppState>, model: String) {
 }
 
 #[tauri::command]
-async fn list_models(provider: String) -> Result<Vec<String>, String> {
-    let (kind, host) = match provider.as_str() {
+async fn list_models(provider: String, host: String) -> Result<Vec<String>, String> {
+    let (kind, default_host) = match provider.as_str() {
         "ollama" => ("ollama", "http://localhost:11434"),
         "llama_cpp" | "llamacpp" => ("llama_cpp", "http://localhost:8080"),
         other => return Err(format!("Unknown provider: {}", other)),
+    };
+    let host = if host.trim().is_empty() {
+        default_host
+    } else {
+        host.trim()
     };
 
     let provider = AnyProvider::from_kind(kind, host, "").map_err(|e| e.to_string())?;

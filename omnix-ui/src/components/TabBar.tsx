@@ -1,6 +1,7 @@
 import { useTabStore } from "@/store/tabs";
 import { useChatStore } from "@/store/chat";
 import { useSessionStore } from "@/store/sessions";
+import { syncSettingsFromSession } from "@/lib/sessionRuntime";
 import { cn } from "@/lib/utils";
 import { X } from "lucide-react";
 
@@ -38,6 +39,7 @@ export function TabBar() {
 
     selectTab(index);
     setActiveSession(tabs[index].id);
+    syncSettingsFromSession(tabs[index].id);
 
     const snap = loadSnapshot(tabs[index].id);
     if (snap) {
@@ -75,6 +77,7 @@ export function TabBar() {
           chat.setContextUsage(snap.contextUsedTokens, snap.contextMaxTokens, snap.contextPercent);
         }
         setActiveSession(nextTab.id);
+        syncSettingsFromSession(nextTab.id);
       }
     }
   };

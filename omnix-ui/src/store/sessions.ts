@@ -12,6 +12,7 @@ interface SessionState {
   addSession: (s: SessionInfo) => void;
   removeSession: (id: string) => void;
   updateTitle: (id: string, title: string) => void;
+  updateRuntime: (id: string, runtime: Partial<Pick<SessionInfo, "provider" | "host" | "model">>) => void;
   markSaved: (id: string) => void;
   setActiveSession: (id: string | null) => void;
   setRenameTarget: (id: string | null) => void;
@@ -42,6 +43,9 @@ export const useSessionStore = create<SessionState>((set) => ({
   })),
   updateTitle: (id, title) => set((state) => ({
     sessions: state.sessions.map((s) => s.id === id ? { ...s, title } : s),
+  })),
+  updateRuntime: (id, runtime) => set((state) => ({
+    sessions: state.sessions.map((s) => s.id === id ? { ...s, ...runtime } : s),
   })),
   markSaved: (id) => set((state) => {
     const sessions = state.sessions.map((s) =>

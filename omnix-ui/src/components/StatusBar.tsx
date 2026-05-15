@@ -11,7 +11,7 @@ export function StatusBar() {
     messages,
   } =
     useChatStore();
-  const { model, provider, permissionMode } = useSettingsStore();
+  const { model, provider, host, permissionMode } = useSettingsStore();
 
   if (!model && messages.length === 0) return null;
 
@@ -20,6 +20,11 @@ export function StatusBar() {
       <div className="flex items-center gap-4 max-w-[var(--composer-w,760px)] w-full">
         {provider && (
           <span className="text-foreground">{provider}</span>
+        )}
+        {host && (
+          <span className="max-w-40 truncate font-mono text-[10px] text-muted-foreground">
+            {host}
+          </span>
         )}
         {model && (
           <span className="font-medium text-foreground">{model}</span>

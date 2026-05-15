@@ -60,6 +60,7 @@ pub struct SessionListEntry {
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub provider: String,
+    pub host: String,
     pub model: String,
     pub title: String,
 }

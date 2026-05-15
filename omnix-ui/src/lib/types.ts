@@ -41,6 +41,7 @@ export interface SessionInfo {
   title: string;
   updatedAt: string;
   provider: string;
+  host: string;
   model: string;
 }
 
@@ -51,6 +52,7 @@ export interface SessionListEntry {
   total_input_tokens: number;
   total_output_tokens: number;
   provider: string;
+  host: string;
   model: string;
   title: string;
 }
@@ -64,8 +66,8 @@ export type CoreEvent =
   | { event: "turn_started"; session_id: string; model: string }
   | { event: "turn_ended"; session_id: string; stop_reason: StopReason; usage: { input_tokens: number; output_tokens: number } }
   | { event: "approval_requested"; session_id: string; call_id: string; tool_name: string; tool_input: Record<string, unknown>; risk_level: RiskLevel; description: string }
-  | { event: "session_created"; id: string; provider: string; model: string }
-  | { event: "session_loaded"; id: string; messages: ChatMessage[]; total_input_tokens: number; total_output_tokens: number; title: string; provider: string; model: string }
+  | { event: "session_created"; id: string; provider: string; host: string; model: string }
+  | { event: "session_loaded"; id: string; messages: ChatMessage[]; total_input_tokens: number; total_output_tokens: number; title: string; provider: string; host: string; model: string }
   | { event: "session_saved"; id: string }
   | { event: "session_deleted"; id: string }
   | { event: "session_listed"; sessions: SessionListEntry[] }
@@ -75,7 +77,7 @@ export type CoreEvent =
   | { event: "max_iterations_reached"; limit: number }
   | { event: "context_updated"; session_id: string; used_tokens: number; max_tokens: number | null; percent: number | null }
   | { event: "model_changed"; model: string }
-  | { event: "provider_status_changed"; provider: string; connected: boolean }
+  | { event: "provider_status_changed"; provider: string; host: string; connected: boolean }
   | { event: "memory_added"; target: string; content: string; usage: string }
   | { event: "memory_replaced"; target: string; old_text: string; new_text: string; usage: string }
   | { event: "memory_removed"; target: string; old_text: string; usage: string }

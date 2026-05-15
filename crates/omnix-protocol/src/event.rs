@@ -47,6 +47,7 @@ pub enum CoreEvent {
     SessionCreated {
         id: String,
         provider: String,
+        host: String,
         model: String,
     },
     SessionLoaded {
@@ -56,6 +57,7 @@ pub enum CoreEvent {
         total_output_tokens: u64,
         title: String,
         provider: String,
+        host: String,
         model: String,
     },
     SessionSaved {
@@ -89,6 +91,7 @@ pub enum CoreEvent {
     },
     ProviderStatusChanged {
         provider: String,
+        host: String,
         connected: bool,
     },
     ToolRegistered {

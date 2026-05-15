@@ -124,17 +124,20 @@ export function useCoreEvents() {
                 });
                 break;
               case "session_created":
-                sessions.addSession({ id: event.id, title: "New session", updatedAt: new Date().toISOString(), provider: event.provider, model: event.model });
+                sessions.addSession({ id: event.id, title: "New session", updatedAt: new Date().toISOString(), provider: event.provider, host: event.host, model: event.model });
                 useTabStore.getState().openTab(event.id, "New session");
                 chat.clear();
                 settings.setProvider(event.provider);
+                settings.setHost(event.host);
                 settings.setModel(event.model);
                 sessions.setActiveSession(event.id);
                 break;
               case "session_loaded":
                 chat.setMessages(convertChatMessages(event.messages));
                 chat.setTokens(event.total_input_tokens, event.total_output_tokens);
+                sessions.updateRuntime(event.id, { provider: event.provider, host: event.host, model: event.model });
                 settings.setProvider(event.provider);
+                settings.setHost(event.host);
                 settings.setModel(event.model);
                 if (event.title) sessions.updateTitle(event.id, event.title);
                 break;
@@ -155,6 +158,7 @@ export function useCoreEvents() {
                   title: s.title || "Saved Chat",
                   updatedAt: s.updated_at,
                   provider: s.provider,
+                  host: s.host,
                   model: s.model,
                 })));
                 break;
@@ -183,9 +187,18 @@ export function useCoreEvents() {
               }
               case "model_changed":
                 settings.setModel(event.model);
+                {
+                  const activeSessionId = useSessionStore.getState().activeSessionId;
+                  if (activeSessionId) sessions.updateRuntime(activeSessionId, { model: event.model });
+                }
                 break;
               case "provider_status_changed":
-                if (event.connected) settings.setProvider(event.provider);
+                if (event.connected) {
+                  settings.setProvider(event.provider);
+                  settings.setHost(event.host);
+                  const activeSessionId = useSessionStore.getState().activeSessionId;
+                  if (activeSessionId) sessions.updateRuntime(activeSessionId, { provider: event.provider, host: event.host });
+                }
                 break;
               case "memory_added":
               case "memory_replaced":

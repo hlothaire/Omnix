@@ -14,6 +14,7 @@ pub struct Session {
     pub updated_at: DateTime<Utc>,
     pub model: String,
     pub provider: String,
+    pub provider_host: String,
     pub title: String,
     pub messages: Vec<ChatMessage>,
     pub total_input_tokens: u64,
@@ -28,6 +29,7 @@ pub struct SessionMetadata {
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub provider: String,
+    pub provider_host: String,
     pub model: String,
     pub title: String,
 }
@@ -45,6 +47,8 @@ enum SessionRecord {
         #[serde(default)]
         provider: String,
         #[serde(default)]
+        provider_host: String,
+        #[serde(default)]
         title: String,
         #[serde(default)]
         total_input_tokens: u64,
@@ -57,6 +61,14 @@ enum SessionRecord {
 impl Session {
     /// Create a new blank session.
     pub fn new(model: impl Into<String>, provider: impl Into<String>) -> Self {
+        Self::new_with_host(model, provider, String::new())
+    }
+
+    pub fn new_with_host(
+        model: impl Into<String>,
+        provider: impl Into<String>,
+        provider_host: impl Into<String>,
+    ) -> Self {
         let now = Utc::now();
         let id = format!("session-{}", now.timestamp_millis());
         Self {
@@ -65,6 +77,7 @@ impl Session {
             updated_at: now,
             model: model.into(),
             provider: provider.into(),
+            provider_host: provider_host.into(),
             title: String::from("New session"),
             messages: Vec::new(),
             total_input_tokens: 0,
@@ -231,6 +244,7 @@ Respond ONLY to the latest user message that appears after this summary.\n\n{}",
             created_at: self.created_at,
             updated_at: self.updated_at,
             provider: self.provider.clone(),
+            provider_host: self.provider_host.clone(),
             title: self.title.clone(),
             total_input_tokens: self.total_input_tokens,
             total_output_tokens: self.total_output_tokens,
@@ -283,6 +297,7 @@ Respond ONLY to the latest user message that appears after this summary.\n\n{}",
                     total_input_tokens: session.total_input_tokens,
                     total_output_tokens: session.total_output_tokens,
                     provider: session.provider.clone(),
+                    provider_host: session.provider_host.clone(),
                     model: session.model.clone(),
                     title: session.title.clone(),
                 });
@@ -303,6 +318,7 @@ Respond ONLY to the latest user message that appears after this summary.\n\n{}",
         let mut updated_at = None;
         let mut model = None;
         let mut provider = String::new();
+        let mut provider_host = String::new();
         let mut title = String::new();
         let mut messages = Vec::new();
         let mut total_input_tokens = 0u64;
@@ -324,6 +340,7 @@ Respond ONLY to the latest user message that appears after this summary.\n\n{}",
                     updated_at: u,
                     model: m,
                     provider: p,
+                    provider_host: h,
                     title: t,
                     total_input_tokens: ti,
                     total_output_tokens: to,
@@ -334,6 +351,7 @@ Respond ONLY to the latest user message that appears after this summary.\n\n{}",
                     updated_at = Some(u);
                     model = Some(m);
                     provider = p;
+                    provider_host = h;
                     title = t;
                     total_input_tokens = ti;
                     total_output_tokens = to;
@@ -348,6 +366,7 @@ Respond ONLY to the latest user message that appears after this summary.\n\n{}",
             updated_at: updated_at.context("Missing session_meta.updated_at")?,
             model: model.context("Missing session_meta.model")?,
             provider,
+            provider_host,
             title,
             messages,
             total_input_tokens,
@@ -552,6 +571,7 @@ mod tests {
             created_at: original.created_at,
             updated_at: original.updated_at,
             provider: String::new(),
+            provider_host: String::new(),
             title: String::new(),
             total_input_tokens: 0,
             total_output_tokens: 0,
@@ -593,6 +613,7 @@ mod tests {
             created_at: session.created_at,
             updated_at: session.updated_at,
             provider: String::new(),
+            provider_host: String::new(),
             title: String::new(),
             total_input_tokens: 0,
             total_output_tokens: 0,

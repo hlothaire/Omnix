@@ -92,6 +92,7 @@ struct RunningTurn {
     cmd_tx: mpsc::UnboundedSender<CoreCommand>,
     cancel_tx: mpsc::UnboundedSender<()>,
     provider: String,
+    host: String,
     model: String,
 }
 
@@ -113,8 +114,8 @@ impl AgentCore {
         Self {
             provider,
             provider_kind: provider_kind.clone(),
+            session: Session::new_with_host(model, provider_kind.clone(), provider_host.clone()),
             provider_host,
-            session: Session::new(model, provider_kind.clone()),
             tools,
             permissions,
             memory_store_path,
@@ -250,23 +251,26 @@ impl AgentCore {
 
         let (host, provider) = Self::build_provider(
             &self.session.provider,
-            &self.provider_host,
+            &self.session.provider_host,
             &self.session.model,
         )
         .map_err(|e| e.to_string())?;
         self.provider = Some(provider);
         self.provider_host = host;
         self.provider_kind = self.session.provider.clone();
+        self.session.provider_host = self.provider_host.clone();
         Ok(())
     }
 
-    pub fn switch_provider(&mut self, kind: &str) -> Result<(), String> {
+    pub fn switch_provider(&mut self, kind: &str, host: &str) -> Result<(), String> {
         let model = self.session.model.clone();
-        let host = self.provider_host.clone();
-        self.provider =
-            Some(AnyProvider::from_kind(kind, &host, &model).map_err(|e| e.to_string())?);
+        let (host, provider) =
+            Self::build_provider(kind, host, &model).map_err(|e| e.to_string())?;
+        self.provider = Some(provider);
+        self.provider_host = host.clone();
         self.provider_kind = kind.to_string();
         self.session.provider = kind.to_string();
+        self.session.provider_host = host;
         Ok(())
     }
 
@@ -314,7 +318,9 @@ impl AgentCore {
                     };
 
                     if let Some(other) = running_turns.values().next()
-                        && (other.provider != session.provider || other.model != session.model)
+                        && (other.provider != session.provider
+                            || other.host != session.provider_host
+                            || other.model != session.model)
                     {
                         let _ = self.event_tx.send(CoreEvent::ApiError {
                             session_id: Some(session.id.clone()),
@@ -336,14 +342,15 @@ impl AgentCore {
 
                     let can_reuse_current_provider = self.provider.is_some()
                         && session.provider == self.session.provider
+                        && session.provider_host == self.session.provider_host
                         && session.model == self.session.model;
 
                     let (host, provider) = if can_reuse_current_provider {
                         match self.provider.clone() {
-                            Some(provider) => (self.provider_host.clone(), provider),
+                            Some(provider) => (self.session.provider_host.clone(), provider),
                             None => match Self::build_provider(
                                 &session.provider,
-                                &self.provider_host,
+                                &session.provider_host,
                                 &session.model,
                             ) {
                                 Ok(provider) => provider,
@@ -363,7 +370,7 @@ impl AgentCore {
                     } else {
                         match Self::build_provider(
                             &session.provider,
-                            &self.provider_host,
+                            &session.provider_host,
                             &session.model,
                         ) {
                             Ok(provider) => provider,
@@ -410,6 +417,7 @@ impl AgentCore {
                             cmd_tx: child_tx,
                             cancel_tx,
                             provider: child.session.provider.clone(),
+                            host: child.session.provider_host.clone(),
                             model: child.session.model.clone(),
                         },
                     );
@@ -425,11 +433,15 @@ impl AgentCore {
                     if !self.session.messages.is_empty() {
                         let _ = self.session.save_to(&self.sessions_dir);
                     }
-                    self.session =
-                        Session::new(self.session.model.clone(), self.provider_kind.clone());
+                    self.session = Session::new_with_host(
+                        self.session.model.clone(),
+                        self.provider_kind.clone(),
+                        self.provider_host.clone(),
+                    );
                     let _ = self.event_tx.send(CoreEvent::SessionCreated {
                         id: self.session.id.clone(),
                         provider: self.session.provider.clone(),
+                        host: self.session.provider_host.clone(),
                         model: self.session.model.clone(),
                     });
                     let _ = self.session.save_to(&self.sessions_dir);
@@ -456,6 +468,7 @@ impl AgentCore {
                             let ti = session.total_input_tokens;
                             let to = session.total_output_tokens;
                             let prov = session.provider.clone();
+                            let host = session.provider_host.clone();
                             let model = session.model.clone();
                             let stitle = session.title.clone();
                             self.session = session;
@@ -473,6 +486,7 @@ impl AgentCore {
                                 total_output_tokens: to,
                                 title: stitle,
                                 provider: prov,
+                                host,
                                 model,
                             });
                             self.emit_context_update().await;
@@ -497,6 +511,7 @@ impl AgentCore {
                                 total_input_tokens: m.total_input_tokens,
                                 total_output_tokens: m.total_output_tokens,
                                 provider: m.provider,
+                                host: m.provider_host,
                                 model: m.model,
                                 title: m.title,
                             })
@@ -578,7 +593,7 @@ impl AgentCore {
                     }
                     let _ = self.event_tx.send(CoreEvent::ModelChanged { model });
                 }
-                CoreCommand::SetProvider { provider } => {
+                CoreCommand::SetProvider { provider, host } => {
                     if !running_turns.is_empty() {
                         let _ = self.event_tx.send(CoreEvent::ApiError {
                             session_id: Some(self.session.id.clone()),
@@ -597,10 +612,11 @@ impl AgentCore {
                         continue;
                     }
                     let kind = Self::provider_kind_name(&provider).to_string();
-                    match self.switch_provider(&kind) {
+                    match self.switch_provider(&kind, &host) {
                         Ok(()) => {
                             let _ = self.event_tx.send(CoreEvent::ProviderStatusChanged {
                                 provider: kind,
+                                host: self.session.provider_host.clone(),
                                 connected: true,
                             });
                         }
@@ -1364,7 +1380,7 @@ impl AgentCore {
                     }
                     let _ = self.event_tx.send(CoreEvent::ModelChanged { model });
                 }
-                CoreCommand::SetProvider { provider } => {
+                CoreCommand::SetProvider { provider, host } => {
                     if !self.session.messages.is_empty() {
                         let _ = self.event_tx.send(CoreEvent::ApiError {
                             session_id: Some(self.session.id.clone()),
@@ -1374,7 +1390,7 @@ impl AgentCore {
                         continue;
                     }
                     let kind = Self::provider_kind_name(&provider).to_string();
-                    if let Err(e) = self.switch_provider(&kind) {
+                    if let Err(e) = self.switch_provider(&kind, &host) {
                         let _ = self.event_tx.send(CoreEvent::ApiError {
                             session_id: Some(self.session.id.clone()),
                             message: format!("Failed to switch provider: {}", e),
@@ -1808,8 +1824,11 @@ mod tests {
         let (mut core, mut event_rx) = setup_core_with_provider(provider);
         core.session.id = "session-concurrent-active".into();
         let active_id = core.session.id.clone();
-        let mut background =
-            Session::new(core.session.model.clone(), core.session.provider.clone());
+        let mut background = Session::new_with_host(
+            core.session.model.clone(),
+            core.session.provider.clone(),
+            core.session.provider_host.clone(),
+        );
         background.id = "session-concurrent-bg".into();
         let background_id = background.id.clone();
         background.save_to(&core.sessions_dir).unwrap();
@@ -1858,7 +1877,11 @@ mod tests {
         let (mut core, mut event_rx) = setup_core_with_provider(provider);
         core.session.id = "session-different-active".into();
         let active_id = core.session.id.clone();
-        let mut other = Session::new("other-model", core.session.provider.clone());
+        let mut other = Session::new_with_host(
+            "other-model",
+            core.session.provider.clone(),
+            core.session.provider_host.clone(),
+        );
         other.id = "session-different-bg".into();
         let other_id = other.id.clone();
         other.save_to(&core.sessions_dir).unwrap();

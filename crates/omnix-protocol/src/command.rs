@@ -36,6 +36,8 @@ pub enum CoreCommand {
     },
     SetProvider {
         provider: ProviderKind,
+        #[serde(default)]
+        host: String,
     },
     SetPermissionMode {
         mode: PermissionMode,

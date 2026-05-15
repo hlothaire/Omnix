@@ -7,6 +7,7 @@ import {
   deleteSession,
   renameSession,
 } from "@/lib/commands";
+import { syncSettingsFromSession } from "@/lib/sessionRuntime";
 import {
   SidebarHeader,
   SidebarContent,
@@ -97,6 +98,7 @@ export function AppSidebar() {
     const title = sessions.find((s) => s.id === id)?.title || "Chat";
     openTab(id, title);
     setActiveSession(id);
+    syncSettingsFromSession(id);
   };
 
   const handleDelete = (id: string) => {
@@ -128,6 +130,7 @@ export function AppSidebar() {
           loadSession(nextTab.id);
         }
         setActiveSession(nextTab.id);
+        syncSettingsFromSession(nextTab.id);
       }
     }
   };

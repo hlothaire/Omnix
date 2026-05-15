@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Cpu, RefreshCw, Server, Settings2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   Dialog,
   DialogContent,
@@ -30,11 +31,18 @@ const providers = [
   },
 ];
 
+function defaultHost(provider: string) {
+  if (provider === "ollama") return "http://localhost:11434";
+  if (provider === "llama_cpp") return "http://localhost:8080";
+  return "";
+}
+
 export function ProviderMenu() {
-  const { provider, model } = useSettingsStore();
+  const { provider, host, model } = useSettingsStore();
   const { messages, streamingSessionIds } = useChatStore();
   const [open, setOpen] = useState(false);
   const [draftProvider, setDraftProvider] = useState(provider);
+  const [draftHost, setDraftHost] = useState(host);
   const [draftModel, setDraftModel] = useState(model);
   const [models, setModels] = useState<string[]>([]);
   const [isLoadingModels, setIsLoadingModels] = useState(false);
@@ -45,8 +53,9 @@ export function ProviderMenu() {
   useEffect(() => {
     if (!open) return;
     setDraftProvider(provider);
+    setDraftHost(host || defaultHost(provider));
     setDraftModel(model);
-  }, [model, open, provider]);
+  }, [host, model, open, provider]);
 
   useEffect(() => {
     if (!open || !draftProvider || isLocked) return;
@@ -56,7 +65,7 @@ export function ProviderMenu() {
       setIsLoadingModels(true);
       setModelError(null);
       try {
-        const availableModels = await listModels(draftProvider);
+        const availableModels = await listModels(draftProvider, draftHost);
         if (cancelled) return;
         setModels(availableModels);
         if (!availableModels.includes(draftModel)) {
@@ -76,14 +85,15 @@ export function ProviderMenu() {
     return () => {
       cancelled = true;
     };
-  }, [draftProvider, isLocked, open]);
+  }, [draftHost, draftProvider, isLocked, open]);
 
   const activeProvider = providers.find((p) => p.id === provider);
   const canApply = draftProvider.trim().length > 0 && draftModel.trim().length > 0 && !isLocked;
 
   const handleApply = () => {
     if (!canApply) return;
-    if (draftProvider !== provider) setProvider(draftProvider);
+    const resolvedHost = draftHost.trim() || defaultHost(draftProvider);
+    if (draftProvider !== provider || resolvedHost !== host) setProvider(draftProvider, resolvedHost);
     if (draftModel !== model) setModel(draftModel.trim());
     setOpen(false);
   };
@@ -93,7 +103,7 @@ export function ProviderMenu() {
     setIsLoadingModels(true);
     setModelError(null);
     try {
-      const availableModels = await listModels(draftProvider);
+      const availableModels = await listModels(draftProvider, draftHost);
       setModels(availableModels);
       if (!availableModels.includes(draftModel)) {
         setDraftModel(availableModels[0] ?? "");
@@ -147,6 +157,7 @@ export function ProviderMenu() {
                     disabled={isLocked}
                     onClick={() => {
                       setDraftProvider(item.id);
+                      setDraftHost(defaultHost(item.id));
                       setDraftModel("");
                     }}
                     className={cn(
@@ -169,6 +180,17 @@ export function ProviderMenu() {
                 );
               })}
             </div>
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <div className="text-xs font-medium text-muted-foreground">Host</div>
+            <Input
+              value={draftHost}
+              disabled={isLocked || !draftProvider}
+              placeholder={defaultHost(draftProvider) || "Provider default"}
+              onChange={(e) => setDraftHost(e.target.value)}
+              className="font-mono text-xs"
+            />
           </div>
 
           <div className="flex flex-col gap-2">
