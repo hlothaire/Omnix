@@ -8,7 +8,7 @@ import { useApprovalStore } from "@/store/approvals";
 import { useSettingsStore } from "@/store/settings";
 import { useTabStore } from "@/store/tabs";
 import { listSessions } from "@/lib/commands";
-import { routeContextUpdated, routeSessionCompacted } from "@/lib/eventRouting";
+import { routeContextUpdated, routeSessionCompacted, routeTokenDelta, routeTurnEnded, routeTurnStarted } from "@/lib/eventRouting";
 
 export function useCoreEvents() {
   const chat = useChatStore();
@@ -35,21 +35,7 @@ export function useCoreEvents() {
           try {
             switch (event.event) {
               case "token_delta": {
-                const activeId = useSessionStore.getState().activeSessionId ?? "";
-                if (event.session_id === activeId) {
-                  chat.appendToken(event.text);
-                } else {
-                  applyToSnapshot(event.session_id, (msgs) => {
-                    const next = [...msgs];
-                    const last = next[next.length - 1];
-                    if (last && last.role.toLowerCase() === "assistant") {
-                      next[next.length - 1] = { ...last, text: last.text + event.text };
-                    } else {
-                      next.push({ role: "Assistant", text: event.text, thinking: "", toolCalls: [], isError: false, time: new Date().toLocaleTimeString() });
-                    }
-                    return next;
-                  });
-                }
+                routeTokenDelta(event);
                 break;
               }
               case "thinking_delta": {
@@ -122,24 +108,10 @@ export function useCoreEvents() {
                 break;
               }
               case "turn_started":
-                chat.setSessionStreaming(event.session_id, true);
+                routeTurnStarted(event);
                 break;
               case "turn_ended": {
-                const activeId = useSessionStore.getState().activeSessionId ?? "";
-                if (event.session_id === activeId) {
-                  chat.addTokens(event.usage.input_tokens, event.usage.output_tokens);
-                } else {
-                  const snap = useTabStore.getState().snapshots[event.session_id];
-                  if (snap) {
-                    useTabStore.getState().saveSnapshot(event.session_id, {
-                      ...snap,
-                      isStreaming: false,
-                      totalInputTokens: snap.totalInputTokens + event.usage.input_tokens,
-                      totalOutputTokens: snap.totalOutputTokens + event.usage.output_tokens,
-                    });
-                  }
-                }
-                chat.setSessionStreaming(event.session_id, false);
+                routeTurnEnded(event);
                 break;
               }
               case "approval_requested":

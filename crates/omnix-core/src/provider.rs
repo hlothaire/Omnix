@@ -666,6 +666,7 @@ pub struct MockProvider {
     context_error: Option<String>,
     summarize_error: Option<String>,
     summary_response: Option<String>,
+    response_delay_ms: u64,
 }
 
 impl MockProvider {
@@ -677,6 +678,7 @@ impl MockProvider {
             context_error: None,
             summarize_error: None,
             summary_response: None,
+            response_delay_ms: 0,
         }
     }
 
@@ -700,6 +702,11 @@ impl MockProvider {
         self
     }
 
+    pub fn with_response_delay_ms(mut self, delay_ms: u64) -> Self {
+        self.response_delay_ms = delay_ms;
+        self
+    }
+
     pub fn stream_call_count(&self) -> usize {
         self.call_index.load(Ordering::SeqCst)
     }
@@ -712,9 +719,13 @@ impl Provider for MockProvider {
     ) -> BoxFuture<'_, Result<Pin<Box<dyn Stream<Item = StreamEvent> + Send>>>> {
         let idx = self.call_index.fetch_add(1, Ordering::SeqCst);
         let events = self.turns.get(idx).cloned().unwrap_or_default();
+        let response_delay_ms = self.response_delay_ms;
 
         Box::pin(async move {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            if response_delay_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(response_delay_ms)).await;
+            }
             for event in events {
                 let _ = tx.send(event);
             }

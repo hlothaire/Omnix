@@ -334,7 +334,11 @@ impl AgentCore {
                         continue;
                     }
 
-                    let (host, provider) = if session.id == self.session.id {
+                    let can_reuse_current_provider = self.provider.is_some()
+                        && session.provider == self.session.provider
+                        && session.model == self.session.model;
+
+                    let (host, provider) = if can_reuse_current_provider {
                         match self.provider.clone() {
                             Some(provider) => (self.provider_host.clone(), provider),
                             None => match Self::build_provider(
@@ -1776,6 +1780,114 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, CoreEvent::TurnStarted { .. }))
         );
+    }
+
+    fn final_text_turn(text: &str) -> Vec<StreamEvent> {
+        vec![
+            StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: ContentBlockDelta::TextDelta { text: text.into() },
+            },
+            StreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::EndTurn),
+                usage: None,
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn same_provider_sessions_can_stream_concurrently() {
+        let provider = AnyProvider::Mock(
+            MockProvider::new(vec![
+                final_text_turn("active done"),
+                final_text_turn("bg done"),
+            ])
+            .with_context_window(4096)
+            .with_response_delay_ms(25),
+        );
+        let (mut core, mut event_rx) = setup_core_with_provider(provider);
+        core.session.id = "session-concurrent-active".into();
+        let active_id = core.session.id.clone();
+        let mut background =
+            Session::new(core.session.model.clone(), core.session.provider.clone());
+        background.id = "session-concurrent-bg".into();
+        let background_id = background.id.clone();
+        background.save_to(&core.sessions_dir).unwrap();
+
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        cmd_tx
+            .send(CoreCommand::SendPrompt {
+                session_id: Some(active_id.clone()),
+                text: "active request".into(),
+            })
+            .unwrap();
+        cmd_tx
+            .send(CoreCommand::SendPrompt {
+                session_id: Some(background_id.clone()),
+                text: "background request".into(),
+            })
+            .unwrap();
+        cmd_tx.send(CoreCommand::Shutdown).unwrap();
+
+        core.run(cmd_rx).await;
+
+        let mut events = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+
+        assert!(events.iter().any(
+            |e| matches!(e, CoreEvent::TurnStarted { session_id, .. } if session_id == &active_id)
+        ));
+        assert!(events.iter().any(|e| matches!(e, CoreEvent::TurnStarted { session_id, .. } if session_id == &background_id)));
+        assert!(events.iter().any(|e| matches!(e, CoreEvent::TokenDelta { session_id, text } if session_id == &active_id && text == "active done")));
+        assert!(events.iter().any(|e| matches!(e, CoreEvent::TokenDelta { session_id, text } if session_id == &background_id && text == "bg done")));
+        assert_eq!(core.session.messages.len(), 2);
+
+        let background = Session::load_from(&background_id, &core.sessions_dir).unwrap();
+        assert_eq!(background.messages.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_different_model_session_is_blocked() {
+        let provider = AnyProvider::Mock(
+            MockProvider::new(vec![final_text_turn("active done")])
+                .with_context_window(4096)
+                .with_response_delay_ms(50),
+        );
+        let (mut core, mut event_rx) = setup_core_with_provider(provider);
+        core.session.id = "session-different-active".into();
+        let active_id = core.session.id.clone();
+        let mut other = Session::new("other-model", core.session.provider.clone());
+        other.id = "session-different-bg".into();
+        let other_id = other.id.clone();
+        other.save_to(&core.sessions_dir).unwrap();
+
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        cmd_tx
+            .send(CoreCommand::SendPrompt {
+                session_id: Some(active_id),
+                text: "active request".into(),
+            })
+            .unwrap();
+        cmd_tx
+            .send(CoreCommand::SendPrompt {
+                session_id: Some(other_id.clone()),
+                text: "blocked request".into(),
+            })
+            .unwrap();
+        cmd_tx.send(CoreCommand::Shutdown).unwrap();
+
+        core.run(cmd_rx).await;
+
+        let mut events = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+
+        assert!(events.iter().any(|e| matches!(e, CoreEvent::ApiError { session_id: Some(session_id), message, retryable } if session_id == &other_id && message.contains("different provider or model") && !retryable)));
+        let other = Session::load_from(&other_id, &core.sessions_dir).unwrap();
+        assert!(other.messages.is_empty());
     }
 
     #[test]

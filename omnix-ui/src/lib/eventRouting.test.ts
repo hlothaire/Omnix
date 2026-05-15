@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { ChatMessage, DisplayMessage } from "@/lib/types";
-import { routeContextUpdated, routeSessionCompacted } from "@/lib/eventRouting";
+import {
+  routeContextUpdated,
+  routeSessionCompacted,
+  routeTokenDelta,
+  routeTurnEnded,
+  routeTurnStarted,
+} from "@/lib/eventRouting";
 import { useChatStore } from "@/store/chat";
 import { useSessionStore } from "@/store/sessions";
 import { useTabStore } from "@/store/tabs";
@@ -46,6 +52,49 @@ beforeEach(() => {
 });
 
 describe("event routing", () => {
+  it("routes active token deltas to chat state", () => {
+    useSessionStore.getState().setActiveSession("active");
+    saveSnapshot("background", [displayMessage("background")]);
+
+    routeTokenDelta({ event: "token_delta", session_id: "active", text: "hello" });
+
+    expect(useChatStore.getState().messages).toHaveLength(1);
+    expect(useChatStore.getState().messages[0].text).toBe("hello");
+    expect(useTabStore.getState().snapshots.background.messages[0].text).toBe("background");
+  });
+
+  it("routes background token deltas to the matching snapshot", () => {
+    useSessionStore.getState().setActiveSession("active");
+    useChatStore.getState().setMessages([displayMessage("active")]);
+    saveSnapshot("background", [displayMessage("background ")]);
+
+    routeTokenDelta({ event: "token_delta", session_id: "background", text: "delta" });
+
+    expect(useChatStore.getState().messages[0].text).toBe("active");
+    expect(useTabStore.getState().snapshots.background.messages[0].text).toBe("background delta");
+  });
+
+  it("tracks streaming state per session and routes background usage", () => {
+    useSessionStore.getState().setActiveSession("active");
+    saveSnapshot("background", [displayMessage("background")]);
+
+    routeTurnStarted({ event: "turn_started", session_id: "background", model: "test" });
+
+    expect(useChatStore.getState().isStreamingForSession("background")).toBe(true);
+    expect(useChatStore.getState().isStreamingForSession("active")).toBe(false);
+
+    routeTurnEnded({
+      event: "turn_ended",
+      session_id: "background",
+      stop_reason: "EndTurn",
+      usage: { input_tokens: 7, output_tokens: 3 },
+    });
+
+    expect(useChatStore.getState().isStreamingForSession("background")).toBe(false);
+    expect(useTabStore.getState().snapshots.background.totalInputTokens).toBe(7);
+    expect(useTabStore.getState().snapshots.background.totalOutputTokens).toBe(3);
+  });
+
   it("routes active context updates to chat state only", () => {
     useSessionStore.getState().setActiveSession("active");
     saveSnapshot("background", [displayMessage("background")]);
