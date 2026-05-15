@@ -225,7 +225,10 @@ export function AppSidebar() {
                       size="sm"
                       className="h-6.5 px-2 py-0.5 text-[11px]"
                     >
-                      {s.title}
+                      {chat.isStreamingForSession(s.id) && (
+                        <span className="size-1.5 rounded-full bg-primary animate-pulse-soft" />
+                      )}
+                      <span className="truncate">{s.title}</span>
                     </SidebarMenuButton>
                     <DropdownMenu
                       open={menuTarget === s.id}
