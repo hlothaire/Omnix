@@ -1,6 +1,6 @@
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -327,11 +327,6 @@ Respond ONLY to the latest user message that appears after this summary.\n\n{}",
             total_input_tokens,
             total_output_tokens,
         })
-    }
-
-    pub fn sessions_dir() -> Result<PathBuf> {
-        let home = dirs::home_dir().context("Could not determine home directory")?;
-        Ok(home.join(".omnix").join("sessions"))
     }
 }
 

@@ -10,6 +10,7 @@ use omnix_protocol::{
     PermissionMode, Role, SessionListEntry, StopReason, TokenUsage, ToolChoice,
 };
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::AppConfig;
 use crate::memory_store::MemoryStore;
@@ -84,13 +85,12 @@ pub struct AgentCore {
     safety_margin_percent: u8,
     max_keep_recent_tokens: usize,
     should_shutdown: bool,
-    cancel_rx: mpsc::UnboundedReceiver<()>,
-    cancel_tx: mpsc::UnboundedSender<()>,
+    cancellation_token: CancellationToken,
 }
 
 struct RunningTurn {
     cmd_tx: mpsc::UnboundedSender<CoreCommand>,
-    cancel_tx: mpsc::UnboundedSender<()>,
+    cancellation_token: CancellationToken,
     provider: String,
     host: String,
     model: String,
@@ -109,7 +109,6 @@ impl AgentCore {
         sessions_dir: PathBuf,
         event_tx: mpsc::UnboundedSender<CoreEvent>,
     ) -> Self {
-        let (cancel_tx, cancel_rx) = mpsc::unbounded_channel();
         Self {
             provider,
             provider_kind: provider_kind.clone(),
@@ -127,8 +126,7 @@ impl AgentCore {
             safety_margin_percent: 5,
             max_keep_recent_tokens: 20_000,
             should_shutdown: false,
-            cancel_rx,
-            cancel_tx,
+            cancellation_token: CancellationToken::new(),
         }
     }
 
@@ -166,9 +164,7 @@ impl AgentCore {
             .map(|h| h.join(".omnix").join("memory.md"))
             .unwrap_or_else(|| PathBuf::from(".omnix/memory.md"));
 
-        let sessions_dir = dirs::home_dir()
-            .map(|h| h.join(".omnix").join("sessions"))
-            .unwrap_or_else(|| PathBuf::from(".omnix/sessions"));
+        let sessions_dir = AppConfig::expand_home(&config.session.directory)?;
 
         let mut tools = ToolRegistry::new();
         tools.register(Arc::new(crate::tools::bash::Bash));
@@ -398,13 +394,13 @@ impl AgentCore {
                     });
                     child.telemetry = self.telemetry.clone();
                     child.session = session;
-                    let cancel_tx = child.cancel_tx.clone();
+                    let cancellation_token = child.cancellation_token.clone();
 
                     running_turns.insert(
                         child.session.id.clone(),
                         RunningTurn {
                             cmd_tx: child_tx,
-                            cancel_tx,
+                            cancellation_token,
                             provider: child.session.provider.clone(),
                             host: child.session.provider_host.clone(),
                             model: child.session.model.clone(),
@@ -670,15 +666,15 @@ impl AgentCore {
                 CoreCommand::CancelTurn { session_id } => {
                     if let Some(session_id) = session_id {
                         if session_id == self.session.id {
-                            let _ = self.cancel_tx.send(());
+                            self.cancellation_token.cancel();
                         }
                         if let Some(running) = running_turns.get(&session_id) {
-                            let _ = running.cancel_tx.send(());
+                            running.cancellation_token.cancel();
                         }
                     } else {
-                        let _ = self.cancel_tx.send(());
+                        self.cancellation_token.cancel();
                         for running in running_turns.values() {
-                            let _ = running.cancel_tx.send(());
+                            running.cancellation_token.cancel();
                         }
                     }
                 }
@@ -899,23 +895,20 @@ impl AgentCore {
             let mut tool_json: HashMap<usize, String> = HashMap::new();
             let mut latest_usage = TokenUsage::zero();
 
-            while let Some(event) = stream.next().await {
-                if self.should_shutdown {
-                    return;
-                }
-
-                // Check for cancellation via dedicated channel
-                if self.cancel_rx.try_recv().is_ok() {
-                    if !text_buffer.is_empty() {
-                        self.session
-                            .push_message(ChatMessage::assistant_text(text_buffer));
+            loop {
+                let event = tokio::select! {
+                    _ = self.cancellation_token.cancelled() => {
+                        self.finish_cancelled_turn(&session_id, &text_buffer, latest_usage.clone());
+                        return;
                     }
-                    let _ = self.event_tx.send(CoreEvent::TurnEnded {
-                        session_id: session_id.clone(),
-                        stop_reason: StopReason::EndTurn,
-                        usage: latest_usage,
-                    });
-                    let _ = self.session.save_to(&self.sessions_dir);
+                    event = stream.next() => event,
+                };
+
+                let Some(event) = event else {
+                    break;
+                };
+
+                if self.should_shutdown {
                     return;
                 }
                 match event {
@@ -1054,6 +1047,11 @@ impl AgentCore {
             let mut tool_results: Vec<(String, crate::tools::ToolOutput)> = Vec::new();
 
             for (idx, json_str) in &tool_json {
+                if self.cancellation_token.is_cancelled() {
+                    self.finish_cancelled_turn(&session_id, "", latest_usage.clone());
+                    return;
+                }
+
                 let Some((id, name)) = tool_meta.get(idx) else {
                     continue;
                 };
@@ -1285,6 +1283,24 @@ impl AgentCore {
         (system_prompt.len() / 4) + self.session.estimated_tokens()
     }
 
+    fn finish_cancelled_turn(
+        &mut self,
+        session_id: &str,
+        text_buffer: &str,
+        latest_usage: TokenUsage,
+    ) {
+        if !text_buffer.is_empty() {
+            self.session
+                .push_message(ChatMessage::assistant_text(text_buffer));
+        }
+        let _ = self.event_tx.send(CoreEvent::TurnEnded {
+            session_id: session_id.to_string(),
+            stop_reason: StopReason::EndTurn,
+            usage: latest_usage,
+        });
+        let _ = self.session.save_to(&self.sessions_dir);
+    }
+
     fn context_budget(&self, context_window: usize) -> ContextBudget {
         ContextBudget::new(
             context_window,
@@ -1331,7 +1347,16 @@ impl AgentCore {
         call_id: &str,
         command_rx: &mut mpsc::UnboundedReceiver<CoreCommand>,
     ) -> ApprovalResponse {
-        while let Some(cmd) = command_rx.recv().await {
+        loop {
+            let cmd = tokio::select! {
+                _ = self.cancellation_token.cancelled() => return ApprovalResponse::Deny,
+                cmd = command_rx.recv() => cmd,
+            };
+
+            let Some(cmd) = cmd else {
+                break;
+            };
+
             match cmd {
                 CoreCommand::RespondToApproval {
                     session_id,
@@ -2098,5 +2123,69 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, CoreEvent::ToolCallCompleted { id, .. } if id == "call_1"))
         );
+    }
+
+    #[tokio::test]
+    async fn cancel_during_approval_denies_tool_call() {
+        let turn1 = vec![
+            StreamEvent::ToolCallMeta {
+                index: 0,
+                id: "call_cancel".into(),
+                name: "echo".into(),
+            },
+            StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: ContentBlockDelta::InputJsonDelta {
+                    partial_json: r#"{"message": "test"}"#.into(),
+                },
+            },
+            StreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::ToolUse),
+                usage: None,
+            },
+        ];
+        let turn2 = vec![StreamEvent::MessageDelta {
+            stop_reason: Some(StopReason::EndTurn),
+            usage: None,
+        }];
+
+        let provider = AnyProvider::Mock(MockProvider::new(vec![turn1, turn2]));
+        let (mut core, mut event_rx) = setup_core_with_provider(provider);
+        let session_id = core.session.id.clone();
+        core.permissions.set_mode(PermissionMode::Prompt);
+        core.tools.register(Arc::new(EchoTool));
+
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let cmd_tx2 = cmd_tx.clone();
+        let cancel_session_id = session_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let _ = cmd_tx2.send(CoreCommand::CancelTurn {
+                session_id: Some(cancel_session_id),
+            });
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            let _ = cmd_tx2.send(CoreCommand::Shutdown);
+        });
+        cmd_tx
+            .send(CoreCommand::SendPrompt {
+                session_id: Some(session_id),
+                text: "test".into(),
+            })
+            .unwrap();
+        core.run(cmd_rx).await;
+
+        let mut events = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+
+        assert!(events.iter().any(
+            |e| matches!(e, CoreEvent::ApprovalRequested { call_id, .. } if call_id == "call_cancel")
+        ));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            CoreEvent::ToolCallCompleted { id, output, .. }
+                if id == "call_cancel" && output.is_error && output.output.contains("denied")
+        )));
     }
 }
